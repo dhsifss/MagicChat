@@ -26,6 +26,7 @@ type fakePushService struct {
 	routeUserID          string
 	routeToken           string
 	err                  error
+	handoffToken         string
 }
 
 func (s *fakePushService) RegisterGrant(_ context.Context, cmd mobilepush.RegisterGrantCommand) (mobilepush.Grant, error) {
@@ -34,9 +35,21 @@ func (s *fakePushService) RegisterGrant(_ context.Context, cmd mobilepush.Regist
 		return mobilepush.Grant{}, s.err
 	}
 	return mobilepush.Grant{
+		HandoffToken:   s.handoffToken,
 		InstallationID: cmd.InstallationID, GatewayGrantID: cmd.GatewayGrantID,
 		Platform: cmd.Platform, ExpiresAt: cmd.ExpiresAt,
 	}, nil
+}
+
+func TestPushGrantAPIForwardsRestrictedHandoff(t *testing.T) {
+	ticket := "mph_" + strings.Repeat("a", 43)
+	service := &fakePushService{handoffToken: "mph_" + strings.Repeat("b", 43)}
+	router := pushTestRouter(service)
+	body := `{"installation_id":"00000000-0000-0000-0000-000000000001","grant_id":"00000000-0000-0000-0000-000000000002","platform":"android","manufacturer":"Google","model":"Pixel","expires_at":"2099-01-01T00:00:00Z","registrations":[{"provider":"fcm","token":"native-token"}],"handoff_tokens":["` + ticket + `"]}`
+	w := servePushRequest(router, http.MethodPut, "/api/client/push/grants", body)
+	if w.Code != 200 || len(service.register.HandoffTokens) != 1 || service.register.HandoffTokens[0] != ticket || !strings.Contains(w.Body.String(), service.handoffToken) {
+		t.Fatalf("handoff was not forwarded through authenticated server API: %d %s", w.Code, w.Body.String())
+	}
 }
 
 func (s *fakePushService) RevokeGrant(_ context.Context, userID, installationID, grantID string) error {
@@ -105,7 +118,8 @@ func TestPushAPIRoutesAuthenticatedUser(t *testing.T) {
 	register := servePushRequest(router, http.MethodPut, "/api/client/push/grants", `{
 		"installation_id":"00000000-0000-0000-0000-000000000001",
 		"grant_id":"00000000-0000-0000-0000-000000000002",
-		"send_token":"abcdefghijklmnopqrstuvwxyz1234567890",
+		"manufacturer":"Apple", "model":"iPhone",
+ "registrations":[{"provider":"apns","token":"abcdefghijklmnopqrstuvwxyz1234567890","environment":"production"}],
 		"platform":"ios",
 		"expires_at":"2026-09-21T09:00:00Z"
 	}`)
@@ -137,7 +151,8 @@ func TestPushAPIStrictJSONAndErrors(t *testing.T) {
 	disabled := servePushRequest(router, http.MethodPut, "/api/client/push/grants", `{
 		"installation_id":"00000000-0000-0000-0000-000000000001",
 		"grant_id":"00000000-0000-0000-0000-000000000002",
-		"send_token":"abcdefghijklmnopqrstuvwxyz1234567890",
+		"manufacturer":"Apple", "model":"iPhone",
+ "registrations":[{"provider":"apns","token":"abcdefghijklmnopqrstuvwxyz1234567890","environment":"production"}],
 		"platform":"ios",
 		"expires_at":"2026-09-21T09:00:00Z"
 	}`)
@@ -148,7 +163,8 @@ func TestPushAPIStrictJSONAndErrors(t *testing.T) {
 	limited := servePushRequest(router, http.MethodPut, "/api/client/push/grants", `{
 		"installation_id":"00000000-0000-0000-0000-000000000001",
 		"grant_id":"00000000-0000-0000-0000-000000000002",
-		"send_token":"abcdefghijklmnopqrstuvwxyz1234567890",
+		"manufacturer":"Apple", "model":"iPhone",
+ "registrations":[{"provider":"apns","token":"abcdefghijklmnopqrstuvwxyz1234567890","environment":"production"}],
 		"platform":"ios",
 		"expires_at":"2026-09-21T09:00:00Z"
 	}`)

@@ -4,7 +4,7 @@ import {
   createProtectedApiClient,
   createStoredAccountApiClient,
 } from "@/data/protected-api-client"
-import type { PushDelegation } from "@/notifications/push-types"
+import type { PushDelegation, PushInstallation } from "@/notifications/push-types"
 
 export type PushPreferences = { pause_when_desktop_active: boolean }
 export type PushDeliveryStatus = {
@@ -89,9 +89,10 @@ export async function getPushDeliveryStatus(
 export async function registerPrivatePushGrant(
   target: AuthenticatedTarget,
   delegation: PushDelegation,
+  installation: PushInstallation,
   options: { fetcher?: ApiFetch } = {},
 ) {
-  await createProtectedApiClient(target, options.fetcher).request(
+  const value = await createProtectedApiClient(target, options.fetcher).request<{ handoff_token?: string }>(
     "/api/client/push/grants",
     {
       body: JSON.stringify({
@@ -99,13 +100,19 @@ export async function registerPrivatePushGrant(
         grant_id: delegation.grantId,
         installation_id: delegation.installationId,
         platform: delegation.platform,
-        send_token: delegation.sendToken,
+        manufacturer: installation.manufacturer,
+        model: installation.model,
+        registrations: installation.registrations,
+        handoff_tokens: installation.handoffTokens ?? [],
       }),
       errorMessage: "注册手机推送失败",
       headers: { "Content-Type": "application/json" },
       method: "PUT",
     },
   )
+  const token = value?.handoff_token
+  if (token !== undefined && !/^mph_[A-Za-z0-9_-]{17,4092}$/.test(token)) throw new ApiRequestError("推送转移响应格式错误")
+  return { handoffToken: token }
 }
 
 export async function revokePrivatePushGrant(

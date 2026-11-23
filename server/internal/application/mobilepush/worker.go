@@ -28,6 +28,16 @@ func (s *Service) RunWorker(ctx context.Context) {
 	if !s.enabled {
 		return
 	}
+	cleanupCtx, cancelCleanup := context.WithCancel(ctx)
+	cleanupDone := make(chan struct{})
+	go func() {
+		defer close(cleanupDone)
+		s.runEndpointRevocationWorker(cleanupCtx)
+	}()
+	defer func() {
+		cancelCleanup()
+		<-cleanupDone
+	}()
 	ticker := time.NewTicker(workerPollInterval)
 	defer ticker.Stop()
 	for {
@@ -183,7 +193,7 @@ func (s *Service) claimJobs(ctx context.Context, limit int) ([]store.MobilePushJ
 			return err
 		}
 		if err := tx.Model(&store.UserPushGrant{}).
-			Where("status = ? AND expires_at <= ?", GrantStatusActive, now).
+			Where("status IN ? AND expires_at <= ?", []string{GrantStatusActive, GrantStatusRegistering}, now).
 			Updates(map[string]any{"status": GrantStatusDisabled, "updated_at": now}).Error; err != nil {
 			return err
 		}
@@ -216,6 +226,35 @@ func (s *Service) claimJobs(ctx context.Context, limit int) ([]store.MobilePushJ
 }
 
 func (s *Service) dispatchJob(ctx context.Context, job store.MobilePushJob) error {
+	var grant store.UserPushGrant
+	result := s.db.WithContext(ctx).Select("installation_id").Where("id = ?", job.GrantID).Limit(1).Find(&grant)
+	if result.Error != nil {
+		return result.Error
+	}
+	if result.RowsAffected == 0 {
+		return s.finishJob(ctx, job, JobStatusFailed, "grant_inactive")
+	}
+	dispatch := func(guard *gorm.DB) error {
+		// Claims only reserve work. Registration may have paused, rotated or
+		// revoked the grant since then; refresh both records after taking its lock.
+		var current store.MobilePushJob
+		result := guard.Preload("Grant").Where("id = ? AND status = ? AND lock_token = ?", job.ID, JobStatusSending, job.LockToken).Limit(1).Find(&current)
+		if result.Error != nil || result.RowsAffected == 0 {
+			return result.Error
+		}
+		operation := *s
+		operation.db = guard
+		return operation.dispatchLockedJob(ctx, current)
+	}
+	if s.db.Dialector.Name() != "postgres" {
+		return dispatch(s.db.WithContext(ctx))
+	}
+	// Reuse the lock's dedicated connection for independent committed writes,
+	// including pinning the submission before sending the HTTP request.
+	return withDatabaseLock(ctx, s.db, store.MobilePushInstallationLockKey(grant.InstallationID), dispatch)
+}
+
+func (s *Service) dispatchLockedJob(ctx context.Context, job store.MobilePushJob) error {
 	owned, err := s.renewLease(ctx, job)
 	if err != nil || !owned {
 		return err
@@ -227,7 +266,21 @@ func (s *Service) dispatchJob(ctx context.Context, job store.MobilePushJob) erro
 	if job.UserID != job.Grant.UserID {
 		return s.finishJob(ctx, job, JobStatusFailed, "grant_owner_changed")
 	}
-	if job.Grant.Status != GrantStatusActive || !job.Grant.ExpiresAt.After(now) {
+	if !job.Grant.ExpiresAt.After(now) {
+		return s.finishJob(ctx, job, JobStatusFailed, "grant_inactive")
+	}
+	if job.Grant.Status == GrantStatusRegistering {
+		// Registration can pause across retries. Preserve the notification until
+		// its TTL without spending the delivery failure retry allowance.
+		return s.db.WithContext(ctx).Model(&store.MobilePushJob{}).
+			Where("id = ? AND status = ? AND lock_token = ?", job.ID, JobStatusSending, job.LockToken).
+			Updates(map[string]any{
+				"status": JobStatusRetry, "next_attempt_at": minTime(now.Add(workerPollInterval), job.ExpiresAt),
+				"attempts": job.Attempts - 1, "locked_at": nil, "lock_token": "",
+				"last_error_code": "grant_registering", "updated_at": now,
+			}).Error
+	}
+	if job.Grant.Status != GrantStatusActive {
 		return s.finishJob(ctx, job, JobStatusFailed, "grant_inactive")
 	}
 	eligible, err := s.pushJobStillEligible(ctx, job, now)
@@ -253,10 +306,21 @@ func (s *Service) dispatchJob(ctx context.Context, job store.MobilePushJob) erro
 		if err != nil {
 			return err
 		}
-		if err := s.db.WithContext(ctx).Model(&store.UserPushGrant{}).
+		result := s.db.WithContext(ctx).Model(&store.UserPushGrant{}).
 			Where("id = ? AND send_token_ciphertext = ?", job.Grant.ID, job.Grant.SendTokenCiphertext).
-			Update("send_token_ciphertext", rotated).Error; err != nil {
-			return err
+			Update("send_token_ciphertext", rotated)
+		if result.Error != nil {
+			return result.Error
+		}
+		if result.RowsAffected == 1 {
+			job.Grant.SendTokenCiphertext = rotated
+		}
+	}
+	currentSendToken := sendToken
+	if len(job.SubmissionTokenCiphertext) > 0 {
+		sendToken, err = s.cipher.Decrypt(job.SubmissionTokenCiphertext, []byte(job.ID))
+		if err != nil {
+			return s.finishJob(ctx, job, JobStatusFailed, "submission_token_decryption_failed")
 		}
 	}
 	routeToken, err := s.cipher.Decrypt(job.RouteTokenCiphertext, []byte(job.ID))
@@ -276,6 +340,20 @@ func (s *Service) dispatchJob(ctx context.Context, job store.MobilePushJob) erro
 	}
 	collapseDigest := s.cipher.BlindIndex("conversation\x00" + job.ConversationID)
 	collapseKey := hex.EncodeToString(collapseDigest[:16])
+	if len(job.SubmissionTokenCiphertext) == 0 || s.cipher.NeedsRotation(job.SubmissionTokenCiphertext) {
+		ciphertext, err := s.cipher.Encrypt(sendToken, []byte(job.ID))
+		if err != nil {
+			return err
+		}
+		// Commit the first submission target before the HTTP call. Every retry
+		// uses it even after registration moves the grant to another installation.
+		result := s.db.WithContext(ctx).Model(&store.MobilePushJob{}).
+			Where("id = ? AND status = ? AND lock_token = ?", job.ID, JobStatusSending, job.LockToken).
+			Update("submission_token_ciphertext", ciphertext)
+		if result.Error != nil || result.RowsAffected != 1 {
+			return result.Error
+		}
+	}
 	sendCtx, cancel := context.WithTimeout(ctx, gatewaySendTimeout)
 	defer cancel()
 	remainingTTL := job.ExpiresAt.Sub(now)
@@ -285,7 +363,7 @@ func (s *Service) dispatchJob(ctx context.Context, job store.MobilePushJob) erro
 		job.ID+":"+job.Grant.GatewayGrantID,
 		NotificationRequest{
 			Event: "message.created", RouteToken: routeToken,
-			CollapseKey: collapseKey, TTLSeconds: ttlSeconds,
+			CollapseKey: collapseKey, TTLSeconds: ttlSeconds, ExpiresAt: job.ExpiresAt,
 		},
 	)
 	if err == nil {
@@ -298,6 +376,9 @@ func (s *Service) dispatchJob(ctx context.Context, job store.MobilePushJob) erro
 	code := safeCode(gatewayErr.Code)
 	switch gatewayErr.Kind {
 	case GatewayErrorRevoked:
+		if sendToken != currentSendToken {
+			return s.finishJob(ctx, job, JobStatusFailed, code)
+		}
 		return s.disableGrant(ctx, job, code)
 	case GatewayErrorRetry:
 		return s.retryJob(ctx, job, code)
@@ -318,7 +399,9 @@ func (s *Service) retryJob(ctx context.Context, job store.MobilePushJob, code st
 	now := s.now().UTC()
 	backoff := time.Duration(1<<min(job.Attempts, 6)) * time.Second
 	nextAttempt := now.Add(backoff)
-	if job.Attempts >= maxJobAttempts || !nextAttempt.Before(job.ExpiresAt) {
+	if code == "no_eligible_endpoint" {
+		nextAttempt = minTime(nextAttempt, job.ExpiresAt)
+	} else if job.Attempts >= maxJobAttempts || !nextAttempt.Before(job.ExpiresAt) {
 		return s.finishJob(ctx, job, JobStatusFailed, code)
 	}
 	return s.db.WithContext(ctx).Model(&store.MobilePushJob{}).
@@ -352,7 +435,7 @@ func (s *Service) disableGrant(ctx context.Context, job store.MobilePushJob, cod
 			return owned.Error
 		}
 		disabled := tx.Model(&store.UserPushGrant{}).
-			Where("id = ? AND gateway_grant_id = ?", job.GrantID, job.Grant.GatewayGrantID).
+			Where("id = ? AND gateway_grant_id = ? AND send_token_ciphertext = ?", job.GrantID, job.Grant.GatewayGrantID, job.Grant.SendTokenCiphertext).
 			Updates(map[string]any{"status": GrantStatusDisabled, "updated_at": now})
 		if disabled.Error != nil || disabled.RowsAffected == 0 {
 			return disabled.Error

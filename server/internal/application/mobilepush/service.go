@@ -60,6 +60,9 @@ func NewService(deps Dependencies) (*Service, error) {
 	service.grants = &grantService{
 		db: deps.DB, cipher: deps.Cipher, enabled: deps.Enabled, now: now,
 	}
+	if endpoints, ok := deps.Gateway.(EndpointClient); ok {
+		service.grants.endpoints = endpoints
+	}
 	service.routes = &routeService{db: deps.DB, now: now}
 	if deps.Enabled {
 		if err := service.registerMessageEventCallback(); err != nil {
@@ -87,9 +90,12 @@ func lockRegistrationKey(tx *gorm.DB, value string) error {
 	if tx.Dialector.Name() != "postgres" {
 		return nil
 	}
+	return tx.Exec("SELECT pg_advisory_xact_lock(?)", registrationLockKey(value)).Error
+}
+
+func registrationLockKey(value string) int64 {
 	digest := sha256.Sum256([]byte(value))
-	key := int64(binary.BigEndian.Uint64(digest[:8]))
-	return tx.Exec("SELECT pg_advisory_xact_lock(?)", key).Error
+	return int64(binary.BigEndian.Uint64(digest[:8]))
 }
 
 func normalizeUUID(value string) (string, error) {

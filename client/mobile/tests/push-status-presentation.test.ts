@@ -4,10 +4,6 @@ import test from "node:test"
 import { presentPushSynchronizationState } from "@/notifications/push-status-presentation"
 
 test("push synchronization terminal states expose actionable user labels", () => {
-  assert.deepEqual(presentPushSynchronizationState("consent_required"), {
-    action: "enable_jpush",
-    label: "未启用",
-  })
   assert.deepEqual(presentPushSynchronizationState("user_disabled"), {
     action: "enable_notifications",
     label: "已关闭",

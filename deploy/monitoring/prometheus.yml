@@ -11,10 +11,3 @@ scrape_configs:
     static_configs:
       - targets:
           - server:20080
-
-  - job_name: magicchat-push-gateway
-    scheme: https
-    metrics_path: /api/metrics
-    static_configs:
-      - targets:
-          - push.jiying.chat:443

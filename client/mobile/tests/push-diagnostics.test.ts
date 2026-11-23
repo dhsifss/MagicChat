@@ -112,11 +112,11 @@ test("旧账号注册完成或失败不能覆盖新账号诊断，原始异常�
   const pending = sync(identity)
   current = false
   const next = { ...identity, accountId: "next-account", generation: 2 }
-  updatePushRegistrationDiagnostic(next, "gateway")
+  updatePushRegistrationDiagnostic(next, "private_server")
   complete(true)
   await pending
   assert.equal(getPushRegistrationDiagnostic().accountId, "next-account")
-  assert.equal(getPushRegistrationDiagnostic().stage, "gateway")
+  assert.equal(getPushRegistrationDiagnostic().stage, "private_server")
   const failed = new Function(
     "isCurrentPushIdentity",
     "updatePushRegistrationDiagnostic",

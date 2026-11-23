@@ -14,14 +14,24 @@ type PushAPI struct {
 }
 
 type registerPushGrantRequest struct {
-	InstallationID string    `json:"installation_id"`
-	GrantID        string    `json:"grant_id"`
-	SendToken      string    `json:"send_token"`
-	Platform       string    `json:"platform"`
-	ExpiresAt      time.Time `json:"expires_at"`
+	HandoffTokens  []string                          `json:"handoff_tokens"`
+	InstallationID string                            `json:"installation_id"`
+	GrantID        string                            `json:"grant_id"`
+	Manufacturer   string                            `json:"manufacturer"`
+	Model          string                            `json:"model"`
+	Registrations  []pushProviderRegistrationRequest `json:"registrations"`
+	Platform       string                            `json:"platform"`
+	ExpiresAt      time.Time                         `json:"expires_at"`
+}
+
+type pushProviderRegistrationRequest struct {
+	Provider    string `json:"provider"`
+	Token       string `json:"token"`
+	Environment string `json:"environment,omitempty"`
 }
 
 type pushGrantResponse struct {
+	HandoffToken   string    `json:"handoff_token,omitempty"`
 	InstallationID string    `json:"installation_id"`
 	GrantID        string    `json:"grant_id"`
 	Platform       string    `json:"platform"`
@@ -182,7 +192,7 @@ func (a *PushAPI) pushStatus(c echo.Context) error {
 
 // registerGrant godoc
 //
-// @Summary 注册当前手机的公共推送授权
+// @Summary 登记当前手机的推送设备
 // @Tags 客户端推送
 // @Accept json
 // @Produce json
@@ -195,19 +205,26 @@ func (a *PushAPI) pushStatus(c echo.Context) error {
 // @Failure 503 {object} errorEnvelope
 // @Router /api/client/push/grants [put]
 func (a *PushAPI) registerGrant(c echo.Context) error {
+	c.Response().Header().Set("Cache-Control", "no-store")
 	current, ok := CurrentAccount(c)
 	currentSession, sessionOK := CurrentAccountSession(c)
 	if !ok || !sessionOK {
 		return writeFailure(c, http.StatusUnauthorized, "unauthorized", "未登录")
 	}
+	c.Request().Body = http.MaxBytesReader(c.Response().Writer, c.Request().Body, 96*1024)
 	var request registerPushGrantRequest
 	if err := decodeStrictJSON(c, &request); err != nil {
 		return writeFailure(c, http.StatusBadRequest, "invalid_request", "请求格式错误")
 	}
+	registrations := make([]mobilepush.ProviderRegistration, 0, len(request.Registrations))
+	for _, registration := range request.Registrations {
+		registrations = append(registrations, mobilepush.ProviderRegistration{Provider: registration.Provider, Token: registration.Token, Environment: registration.Environment})
+	}
 	grant, err := a.push.RegisterGrant(c.Request().Context(), mobilepush.RegisterGrantCommand{
 		UserID: current.ID, SessionID: currentSession.ID, InstallationID: request.InstallationID,
-		GatewayGrantID: request.GrantID, SendToken: request.SendToken,
+		GatewayGrantID: request.GrantID, Manufacturer: request.Manufacturer, Model: request.Model, Registrations: registrations,
 		Platform: request.Platform, ExpiresAt: request.ExpiresAt,
+		HandoffTokens: request.HandoffTokens,
 	})
 	if err != nil {
 		return writePushError(c, err)
@@ -215,16 +232,17 @@ func (a *PushAPI) registerGrant(c echo.Context) error {
 	return writeSuccess(c, http.StatusOK, pushGrantResponse{
 		InstallationID: grant.InstallationID, GrantID: grant.GatewayGrantID,
 		Platform: grant.Platform, ExpiresAt: grant.ExpiresAt,
+		HandoffToken: grant.HandoffToken,
 	})
 }
 
 // revokeGrant godoc
 //
-// @Summary 删除当前手机的本地推送授权
+// @Summary 注销当前手机的推送设备
 // @Tags 客户端推送
 // @Accept json
 // @Param installation_id path string true "安装实例 ID"
-// @Param request body revokePushGrantRequest true "待撤销的公共授权"
+// @Param request body revokePushGrantRequest true "待撤销的设备绑定"
 // @Success 204
 // @Failure 400 {object} errorEnvelope
 // @Failure 401 {object} errorEnvelope
@@ -279,6 +297,8 @@ func writePushError(c echo.Context, err error) error {
 	switch code {
 	case "unauthorized":
 		status = http.StatusUnauthorized
+	case "unsupported_provider":
+		status = http.StatusUnprocessableEntity
 	case "invalid_request":
 		status = http.StatusBadRequest
 	case "route_not_found":
@@ -287,7 +307,7 @@ func writePushError(c echo.Context, err error) error {
 		status = http.StatusConflict
 	case "grant_limit_reached":
 		status = http.StatusTooManyRequests
-	case "push_disabled":
+	case "push_disabled", "push_service_unavailable":
 		status = http.StatusServiceUnavailable
 	}
 	return writeFailure(c, status, code, mobilepush.ErrorMessage(err))

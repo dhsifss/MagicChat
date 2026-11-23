@@ -2,7 +2,6 @@ import type { PushSynchronizationState } from "@/notifications/push-coordinator"
 
 export type PushStatusAction =
   | "none"
-  | "enable_jpush"
   | "enable_notifications"
   | "open_settings"
   | "retry"
@@ -19,10 +18,6 @@ const PRESENTATIONS: Record<
   PushSynchronizationState,
   PushStatusPresentation
 > = {
-  consent_required: {
-    action: "enable_jpush",
-    label: "未启用",
-  },
   user_disabled: {
     action: "enable_notifications",
     label: "已关闭",

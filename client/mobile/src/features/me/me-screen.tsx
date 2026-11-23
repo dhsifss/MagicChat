@@ -36,15 +36,12 @@ import { ApiRequestError } from "@/data/api-client"
 import { useCachedAppInfo } from "@/data/auth/auth-hooks"
 import { AppUpdateDialog } from "@/features/updates/app-update-dialog"
 import { useAppUpdate } from "@/features/updates/use-app-update"
-import { stopJPush } from "@/notifications/jpush-registration"
 import type { PushSynchronizationState } from "@/notifications/push-coordinator"
 import {
-  clearPushReminder,
   recordPushReminder,
   setPushReminderExplicitlyDisabled,
 } from "@/notifications/push-reminder"
 import {
-  saveJPushConsent,
   updatePushReminderState,
 } from "@/notifications/push-registration-store"
 import { presentPushSynchronizationState } from "@/notifications/push-status-presentation"
@@ -72,7 +69,7 @@ const THEME_LABELS: Record<ThemePreference, string> = {
   system: "跟随系统",
 }
 
-type PushDialogKind = "consent" | "permission"
+type PushDialogKind = "permission"
 
 export function MeScreen() {
   const { colors } = useXGUITheme()
@@ -101,7 +98,6 @@ export function MeScreen() {
   )
   const [pushDialog, setPushDialog] = useState<PushDialogKind | null>(null)
   const [pushDialogError, setPushDialogError] = useState("")
-  const [pushDialogPending, setPushDialogPending] = useState(false)
   const [logoutSheetOpen, setLogoutSheetOpen] = useState(false)
   const [completedLogoutAccountId, setCompletedLogoutAccountId] = useState<string | null>(null)
   const [pendingTheme, setPendingTheme] = useState<ThemePreference>(themePreference)
@@ -158,7 +154,7 @@ export function MeScreen() {
       toast.show({ message: "手机通知已开启", modal: false, type: "success" })
       return
     }
-    if (pushState === "consent_required" || pushState === "permission_denied") {
+    if (pushState === "permission_denied") {
       return
     }
     toast.show({
@@ -218,15 +214,8 @@ export function MeScreen() {
   function handlePushStatusPress() {
     setPushDialogError("")
     switch (pushStatus.action) {
-      case "enable_jpush":
-        setPushDialog("consent")
-        return
       case "enable_notifications":
-        if (Platform.OS === "android") {
-          setPushDialog("consent")
-        } else {
-          enablePushWithoutJPushConsent()
-        }
+        enableNotifications()
         return
       case "open_settings":
         setPushDialog("permission")
@@ -268,7 +257,7 @@ export function MeScreen() {
     disablePushImmediately()
   }
 
-  function enablePushWithoutJPushConsent() {
+  function enableNotifications() {
     setPushSwitchEnabled(true)
     void updatePushReminderState((current) =>
       setPushReminderExplicitlyDisabled(current, false)
@@ -297,8 +286,7 @@ export function MeScreen() {
   }
 
   function dismissPushDialog() {
-    if (pushDialogPending) return
-    if (pushDialog === "consent" || pushDialog === "permission") {
+    if (pushDialog === "permission") {
       void updatePushReminderState((current) =>
         recordPushReminder(
           current,
@@ -309,28 +297,6 @@ export function MeScreen() {
     }
     setPushDialogError("")
     setPushDialog(null)
-  }
-
-  function enablePushFromDialog() {
-    setPushDialogPending(true)
-    setPushDialogError("")
-    void Promise.all([
-      saveJPushConsent(true),
-      updatePushReminderState((current) =>
-        clearPushReminder(
-          setPushReminderExplicitlyDisabled(current, false),
-          "consent"
-        )
-      ),
-    ])
-      .then(() => {
-        setPushDialog(null)
-        startPushSynchronization()
-      })
-      .catch(() => {
-        setPushDialogError("无法保存通知授权，请稍后重试。")
-      })
-      .finally(() => setPushDialogPending(false))
   }
 
   function openPushSettings() {
@@ -360,12 +326,10 @@ export function MeScreen() {
         })
       }
       await Promise.all([
-        saveJPushConsent(false),
         updatePushReminderState((current) =>
           setPushReminderExplicitlyDisabled(current, true)
         ),
       ])
-      await stopJPush().catch(() => undefined)
       pushCoordinator.triggerSynchronization()
     })().catch(() => {
       setPushSwitchEnabled(true)
@@ -378,29 +342,10 @@ export function MeScreen() {
   }
 
   const pushDialogContent = getPushDialogContent(pushDialog)
-  const pushDialogActions: XGUIDialogAction[] =
-    pushDialog === "consent"
-      ? [
-          {
-            disabled: pushDialogPending,
-            label: "暂不启用",
-            onPress: dismissPushDialog,
-          },
-          {
-            disabled: pushDialogPending,
-            label: pushDialogPending ? "正在启用…" : "同意并启用",
-            onPress: enablePushFromDialog,
-            variant: "primary",
-          },
-        ]
-      : [
-          { label: "暂不提醒", onPress: dismissPushDialog },
-          {
-            label: "去设置",
-            onPress: openPushSettings,
-            variant: "primary",
-          },
-        ]
+  const pushDialogActions: XGUIDialogAction[] = [
+    { label: "暂不提醒", onPress: dismissPushDialog },
+    { label: "去设置", onPress: openPushSettings, variant: "primary" },
+  ]
 
   function openAboutWebsite() {
     void Linking.openURL(appConfig.websiteUrl).catch(() => {
@@ -499,7 +444,6 @@ export function MeScreen() {
                     <XGUISwitch
                       accessibilityLabel="手机通知"
                       disabled={
-                        pushDialogPending ||
                         pushState === "synchronizing" ||
                         pushState === "provider_unavailable"
                       }
@@ -564,7 +508,6 @@ export function MeScreen() {
       <XGUIDialog
         actions={pushDialogActions}
         description={pushDialogError || pushDialogContent.description}
-        dismissible={!pushDialogPending}
         onOpenChange={(open) => {
           if (!open) dismissPushDialog()
         }}
@@ -653,12 +596,6 @@ function getPushSynchronizationErrorMessage(state: PushSynchronizationState) {
 
 function getPushDialogContent(kind: PushDialogKind | null) {
   switch (kind) {
-    case "consent":
-      return {
-        description:
-          "Android 通知由极光推送提供。启用后，极光 SDK 会处理完成通知投递所需的设备、系统、网络和应用标识信息；不会收到聊天账号、服务器地址或消息内容。",
-        title: "启用手机通知",
-      }
     case "permission":
       return {
         description:

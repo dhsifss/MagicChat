@@ -1,19 +1,13 @@
 import * as Application from "expo-application"
 import * as Notifications from "expo-notifications"
+import * as Device from "expo-device"
+import { getConfiguredPushProviders, getUnsupportedPushProviders, readVendorPushRegistrations } from "@/notifications/vendor-push-registration"
+import { parseProviderRegistrations } from "@/notifications/push-types"
 import { Platform } from "react-native"
 
 import { ApiRequestError, isUnauthorizedError } from "@/data/api-client"
-import { readJPushRegistrationID, isJPushConfigured } from "@/notifications/jpush-registration"
+import * as Crypto from "expo-crypto"
 import { prepareMessageNotifications } from "@/notifications/message-notifications"
-import {
-  createActivePushGrant,
-  pushGatewayCredentialIsInvalid,
-  pushGatewayInstallationIsDisabled,
-  registerPushInstallation,
-  renewPushGrant,
-  revokePushGrant,
-  updatePushProviderToken,
-} from "@/notifications/push-gateway-api"
 import {
   registerPrivatePushGrant,
   revokePrivatePushGrant,
@@ -23,7 +17,6 @@ import {
   enqueuePendingPushRevocation,
   loadPendingPushRevocations,
   replacePendingPushRevocations,
-  loadJPushConsent,
   loadPushDelegation,
   loadPushInstallation,
   loadPushReminderState,
@@ -41,11 +34,12 @@ import {
   type PushInstallation,
   type PushAccountIdentity,
   type PushPlatform,
+  type PushProviderRegistration,
   type PushProviderName,
   type PendingPushRevocation,
 } from "@/notifications/push-types"
 
-const PRIVATE_PUSH_REGISTRATION_VERSION = 2
+const PRIVATE_PUSH_REGISTRATION_VERSION = 4
 
 function reportRegistrationStage(identity: PushAccountIdentity, stage: PushRegistrationStage) {
   if (isCurrentPushIdentity(identity)) updatePushRegistrationDiagnostic(identity, stage)
@@ -84,6 +78,7 @@ export async function queuePushDelegationRevocation(
   const delegation = await loadPushDelegation()
   if (!delegation || delegation.accountId !== identity.accountId || !targetsMatch(delegation.target, identity.target)) return
   setActiveRemotePushTarget(null)
+  await retainHandoffToken(delegation)
   await enqueuePendingPushRevocation(toPendingRevocation(delegation, privateRevoked))
   await clearPushDelegation()
 }
@@ -138,21 +133,6 @@ async function synchronizeRemotePush(
     setActiveRemotePushTarget(null)
   }
 
-  if (Platform.OS === "android") {
-    if (!(await isJPushConfigured())) {
-      throw new PushLifecycleError(
-        "android_provider_unavailable",
-        "当前安装包未配置 JPush"
-      )
-    }
-    if (!(await loadJPushConsent())) {
-      throw new PushLifecycleError(
-        "jpush_consent_required",
-        "需要先同意启用 JPush 通知"
-      )
-    }
-  }
-
   if (!(await prepareMessageNotifications())) {
     if (delegation && delegation.accountId === identity.accountId && targetsMatch(delegation.target, identity.target)) {
       await markAndRevokeDelegation(
@@ -171,121 +151,102 @@ async function synchronizeRemotePush(
       "推送设备信息暂不可用"
     )
   }
+  if (device.platform === "android" && device.configuredProviders?.every((provider) => device.unsupportedProviders?.includes(provider))) {
+    if (delegation && delegation.accountId === identity.accountId && targetsMatch(delegation.target, target)) {
+      await markAndRevokeDelegation(delegation, await loadPushInstallation())
+    }
+    throw new PushLifecycleError("android_provider_unavailable", "当前设备无可用的安卓推送通道")
+  }
   const appVersion = Application.nativeApplicationVersion ?? "unknown"
 
-  reportRegistrationStage(identity, "gateway")
   let installation = await loadPushInstallation()
-  if (
-    !installation ||
-    installation.environment !== device.environment ||
-    installation.platform !== device.platform ||
-    installation.provider !== device.provider
-  ) {
-    if (delegation) {
-      await markAndRevokeDelegation(delegation, installation)
-      delegation = null
-    }
-    installation = await createInstallation(
-      device.token,
-      device.environment,
-      device.platform,
-      device.provider,
-      appVersion
-    )
-  } else if (
-    installation.providerToken !== device.token ||
-    installation.appVersion !== appVersion
-  ) {
-    try {
-      await updatePushProviderToken(
-        installation.installationId,
-        installation.managementToken,
-        { appVersion, providerToken: device.token }
-      )
-      installation = {
-        ...installation,
-        appVersion,
-        providerToken: device.token,
-      }
-      await savePushInstallation(installation)
-    } catch (error) {
-      if (!pushGatewayCredentialIsInvalid(error)) throw error
-      if (delegation) {
-        await abandonInvalidDelegation(delegation, installation)
-        delegation = null
-      }
-      installation = await createInstallation(
-        device.token,
-        device.environment,
-        device.platform,
-        device.provider,
-        appVersion
-      )
+  const deviceChanged = !installation || installation.platform !== device.platform
+  // Bundled SDKs are optional on a particular device. Recover providers that
+  // previously registered, excluding explicit SDK support-check rejections.
+  const cachedRegistrations = deviceChanged ? [] : installation?.registrations ?? []
+  const expectedProviders = cachedRegistrations.map((r) => r.provider).filter((provider) =>
+    (!device.configuredProviders || device.configuredProviders.includes(provider)) &&
+    !device.unsupportedProviders?.includes(provider))
+  const missingProviders = new Set<PushProviderName>()
+  if (device.platform === "android") {
+    for (const provider of expectedProviders) {
+      if (!device.registrations.some((r) => r.provider === provider)) missingProviders.add(provider)
     }
   }
-  if (!installation) {
-    throw new Error("推送安装凭据不可用")
-  }
-
-  delegation = delegation ?? (await loadPushDelegation())
-  if (
-    delegation &&
-    (delegation.installationId !== installation.installationId ||
-      delegation.accountId !== identity.accountId || !targetsMatch(delegation.target, identity.target) ||
-      delegation.status === "pending_revocation")
-  ) {
-    await markAndRevokeDelegation(delegation, installation)
+  const effectiveRegistrations = parseProviderRegistrations([
+    ...device.registrations,
+    ...cachedRegistrations.filter((r) => missingProviders.has(r.provider)),
+  ], device.platform)
+  if (!effectiveRegistrations) throw new PushLifecycleError("push_registration_invalid", "设备注册信息无效")
+  const registrationsChanged = JSON.stringify(installation?.registrations) !== JSON.stringify(effectiveRegistrations)
+  const tokensUnavailable = device.registrations.length === 0 || missingProviders.size > 0
+  const metadataChanged = installation?.manufacturer !== device.manufacturer || installation?.model !== device.model
+  if (delegation && (deviceChanged || delegation.accountId !== identity.accountId || !targetsMatch(delegation.target, target) ||
+      delegation.status === "pending_revocation" || delegation.privateRegistrationVersion !== PRIVATE_PUSH_REGISTRATION_VERSION)) {
+    const switchingAccount = delegation.accountId !== identity.accountId || !targetsMatch(delegation.target, target)
+    await markAndRevokeDelegation(delegation, installation, switchingAccount)
     delegation = null
+    installation = await loadPushInstallation()
   }
-
-  if (delegation && shouldRenewPushGrant(delegation.expiresAt)) {
-    try {
-      const renewed = await renewPushGrant(
-        delegation.grantId,
-        installation.managementToken
-      )
-      delegation = {
-        ...delegation,
-        expiresAt: renewed.expiresAt,
-        lastSyncedAt: null,
-        status: "pending_registration",
-      }
-      await savePushDelegation(delegation)
-    } catch (error) {
-      if (!pushGatewayCredentialIsInvalid(error)) throw error
-      await abandonInvalidDelegation(delegation, installation)
-      delegation = null
-    }
+  installation = {
+    appVersion, manufacturer: device.manufacturer, model: device.model,
+    installationId: installation?.installationId ?? Crypto.randomUUID(),
+    platform: device.platform,
+    registrations: effectiveRegistrations,
+    ...(installation?.handoffTokens?.length ? { handoffTokens: installation.handoffTokens } : {}),
   }
-
+  await savePushInstallation(installation)
   if (!delegation) {
-    const recovered = await createGrantWithInstallationRecovery(installation)
-    installation = recovered.installation
-    const grant = recovered.grant
     delegation = {
-      expiresAt: grant.expiresAt,
-      grantId: grant.grantId,
-      installationId: installation.installationId,
-      lastSyncedAt: null,
-      platform: installation.platform,
+      expiresAt: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString(),
+      grantId: Crypto.randomUUID(), installationId: installation.installationId,
+      lastSyncedAt: null, platform: installation.platform,
       privateRegistrationVersion: PRIVATE_PUSH_REGISTRATION_VERSION,
-      sendToken: grant.sendToken,
-      status: "pending_registration",
-      accountId: identity.accountId,
-      target,
+      status: "pending_registration", accountId: identity.accountId, target,
     }
+    await savePushDelegation(delegation)
+  }
+  if (shouldRenewPushGrant(delegation.expiresAt)) {
+    delegation = {
+      ...delegation,
+      expiresAt: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString(),
+      lastSyncedAt: null,
+      status: "pending_registration",
+    }
+    await savePushDelegation(delegation)
+  }
+  if (tokensUnavailable && delegation.status === "registered") {
+    delegation = { ...delegation, lastSyncedAt: null, status: "pending_registration" }
     await savePushDelegation(delegation)
   }
 
   reportRegistrationStage(identity, "private_server")
   if (
+    deviceChanged || registrationsChanged || metadataChanged ||
     delegation.status !== "registered" ||
     delegation.privateRegistrationVersion !== PRIVATE_PUSH_REGISTRATION_VERSION ||
     shouldRefreshPrivateRegistration(delegation.lastSyncedAt)
   ) {
+    if (delegation.status !== "pending_registration" || delegation.lastSyncedAt !== null) {
+      delegation = { ...delegation, lastSyncedAt: null, status: "pending_registration" }
+      await savePushDelegation(delegation)
+    }
     try {
-      await registerPrivatePushGrant(target, delegation)
+      const result = await registerPrivatePushGrant(target, delegation, installation)
+      if (result?.handoffToken) {
+        delegation = { ...delegation, handoffToken: result.handoffToken }
+        await savePushDelegation(delegation)
+      }
+      if (installation.handoffTokens?.length) {
+        installation = { ...installation, handoffTokens: [] }
+        await savePushInstallation(installation)
+      }
     } catch (error) {
+      const lookupIncomplete = tokensUnavailable || device.unavailableProviders?.length || device.configuredProviders?.some((provider) =>
+        !device.unsupportedProviders?.includes(provider) && !device.registrations.some((r) => r.provider === provider))
+      if (lookupIncomplete && error && typeof error === "object" && "code" in error && error.code === "unsupported_provider") {
+        throw new PushLifecycleError("push_device_token_unavailable", "推送设备 Token 暂不可用")
+      }
       if (privatePushRegistrationIsPermanentlyRejected(error)) {
         await markAndRevokeDelegation(delegation, installation)
       }
@@ -293,76 +254,50 @@ async function synchronizeRemotePush(
     }
     delegation = {
       ...delegation,
-      lastSyncedAt: new Date().toISOString(),
+      lastSyncedAt: tokensUnavailable ? null : new Date().toISOString(),
       privateRegistrationVersion: PRIVATE_PUSH_REGISTRATION_VERSION,
-      status: "registered",
+      status: tokensUnavailable ? "pending_registration" : "registered",
     }
     await savePushDelegation(delegation)
   }
+
+  if (tokensUnavailable) throw new PushLifecycleError("push_device_token_unavailable", "推送设备 Token 暂不可用")
 
   setActiveRemotePushTarget(identity)
   return true
 }
 
-async function createInstallation(
-  providerToken: string,
-  environment: PushEnvironment,
-  platform: PushPlatform,
-  provider: PushProviderName,
-  appVersion: string
-): Promise<PushInstallation> {
-  const credential = await registerPushInstallation({
-    appVersion,
-    environment,
-    platform,
-    provider,
-    providerToken,
-  })
-  const installation = {
-    appVersion,
-    environment,
-    installationId: credential.installationId,
-    managementToken: credential.managementToken,
-    platform,
-    provider,
-    providerToken,
-  }
-  await savePushInstallation(installation)
-  return installation
-}
-
 async function markAndRevokeDelegation(
   delegation: PushDelegation,
-  installation: PushInstallation | null
+  installation: PushInstallation | null,
+  allowOfflineHandoff = false
 ) {
   setActiveRemotePushTarget(null)
+  await retainHandoffToken(delegation)
   const pending = toPendingRevocation(delegation)
   await enqueuePendingPushRevocation(pending)
   await clearPushDelegation()
-  await revokeStoredDelegation(pending, installation)
+  try { await revokeStoredDelegation(pending, installation) }
+  catch (error) { if (allowOfflineHandoff && delegation.handoffToken) return; throw error }
   await replacePendingPushRevocations((await loadPendingPushRevocations()).filter((item) =>
     !(item.accountId === pending.accountId && item.grantId === pending.grantId)))
 }
 
+async function retainHandoffToken(delegation: PushDelegation) {
+  if (!delegation.handoffToken) return
+  const installation = await loadPushInstallation()
+  if (!installation) return
+  const tokens = [...new Set([...(installation.handoffTokens ?? []), delegation.handoffToken])]
+  if (tokens.length > 10) throw new PushLifecycleError("push_handoff_queue_full", "推送转移暂不可用")
+  await savePushInstallation({ ...installation, handoffTokens: tokens })
+}
+
 async function revokeStoredDelegation(
   delegation: PendingPushRevocation,
-  installation: PushInstallation | null
+  _installation: PushInstallation | null
 ) {
-  let gatewayError: unknown
-  if (
-    !delegation.gatewayRevoked &&
-    installation &&
-    installation.installationId === delegation.installationId
-  ) {
-    try {
-      await revokePushGrant(
-        delegation.grantId,
-        installation.managementToken
-      )
-    } catch (error) {
-      if (!pushGatewayCredentialIsInvalid(error)) gatewayError = error
-    }
-  }
+  // Successful server logout persists upstream cleanup before deleting the
+  // session-bound grant. Its now-invalid credentials need no second request.
   if (!delegation.privateRevoked) {
     try {
       await revokePrivatePushGrant(
@@ -375,17 +310,14 @@ async function revokeStoredDelegation(
       if (!isUnauthorizedError(error)) throw error
     }
   }
-  if (gatewayError) throw gatewayError
 }
 
 function toPendingRevocation(
   delegation: PushDelegation,
-  privateRevoked = false,
-  gatewayRevoked = false
+  privateRevoked = false
 ): PendingPushRevocation {
   return {
     accountId: delegation.accountId,
-    gatewayRevoked,
     grantId: delegation.grantId,
     installationId: delegation.installationId,
     privateRevoked,
@@ -394,99 +326,40 @@ function toPendingRevocation(
   }
 }
 
-async function abandonInvalidDelegation(
-  delegation: PushDelegation,
-  installation: PushInstallation | null
-) {
-  setActiveRemotePushTarget(null)
-  const pending = toPendingRevocation(delegation, false, true)
-  await enqueuePendingPushRevocation(pending)
-  await clearPushDelegation()
-  try {
-    await revokeStoredDelegation(pending, installation)
-    await replacePendingPushRevocations(
-      (await loadPendingPushRevocations()).filter(
-        (item) =>
-          !(item.accountId === pending.accountId && item.grantId === pending.grantId)
-      )
-    )
-  } catch {
-    // The durable queue retries private cleanup without blocking a replacement grant.
-  }
-}
-
-async function createGrantWithInstallationRecovery(
-  installation: PushInstallation
-) {
-  try {
-    return {
-      grant: await createActivePushGrant(
-        installation.installationId,
-        installation.managementToken
-      ),
-      installation,
-    }
-  } catch (error) {
-    if (pushGatewayInstallationIsDisabled(error)) {
-      await updatePushProviderToken(
-        installation.installationId,
-        installation.managementToken,
-        {
-          appVersion: installation.appVersion,
-          providerToken: installation.providerToken,
-        }
-      )
-      return {
-        grant: await createActivePushGrant(
-          installation.installationId,
-          installation.managementToken
-        ),
-        installation,
-      }
-    }
-    if (!pushGatewayCredentialIsInvalid(error)) throw error
-    const replacement = await createInstallation(
-      installation.providerToken,
-      installation.environment,
-      installation.platform,
-      installation.provider,
-      installation.appVersion
-    )
-    return {
-      grant: await createActivePushGrant(
-        replacement.installationId,
-        replacement.managementToken
-      ),
-      installation: replacement,
-    }
-  }
-}
-
 async function readRemotePushDevice(
   pendingDeviceToken?: string
 ): Promise<{
-  environment: PushEnvironment
+  manufacturer: string
+  model: string
   platform: PushPlatform
-  provider: PushProviderName
-  token: string
+  registrations: PushProviderRegistration[]
+  configuredProviders?: PushProviderName[] | null
+  unavailableProviders?: PushProviderName[]
+  unsupportedProviders?: PushProviderName[]
 } | null> {
   if (Platform.OS === "ios") {
     const token = pendingDeviceToken?.trim() || (await readIOSDeviceToken())
     const environment = await readPushEnvironment()
     return token && environment
-      ? { environment, platform: "ios", provider: "apns", token }
+      ? { manufacturer: Device.manufacturer ?? "Apple", model: Device.modelName ?? "", platform: "ios", registrations: [{ provider: "apns", token, environment }] }
       : null
   }
   if (Platform.OS === "android") {
-    const token = await readJPushRegistrationID(true)
-    return token
-      ? {
-          environment: "production",
-          platform: "android",
-          provider: "jpush",
-          token,
-        }
-      : null
+    const configuredProviders = getConfiguredPushProviders()
+    const [native, fcm] = await Promise.all([
+      readVendorPushRegistrations().catch(() => []),
+      configuredProviders && !configuredProviders.includes("fcm") ? Promise.resolve("") : pendingDeviceToken ? Promise.resolve(pendingDeviceToken) :
+        waitForPushDevice(Notifications.getDevicePushTokenAsync(), 5_000)
+          .then((value) => typeof value.data === "string" ? value.data : "")
+          .catch(() => ""),
+    ])
+    const registrations = parseProviderRegistrations([
+      ...native, ...(fcm ? [{ provider: "fcm", token: fcm }] : []),
+    ], "android")
+    if (!registrations) throw new PushLifecycleError("push_registration_invalid", "设备注册信息无效")
+    return { manufacturer: Device.manufacturer ?? "", model: Device.modelName ?? "", platform: "android", registrations, configuredProviders,
+      unsupportedProviders: getUnsupportedPushProviders(),
+      unavailableProviders: !fcm && (!configuredProviders || configuredProviders.includes("fcm")) ? ["fcm"] : [] }
   }
   return null
 }

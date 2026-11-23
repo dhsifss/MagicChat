@@ -287,7 +287,18 @@ func newRouter(db *gorm.DB, cfg config.Config, realtimeOptions realtime.Options,
 		if err != nil {
 			panic(err)
 		}
-		pushGateway = mobilepushapp.NewGatewayClient(cfg.Push.ServerKey)
+		pushGateway, err = mobilepushapp.NewPushServiceClient(mobilepushapp.PushServiceOptions{
+			URL: cfg.Push.ServiceURL, Credential: cfg.Push.ServiceCredential,
+			APNSDevelopmentChannelID: cfg.Push.APNSDevelopmentChannelID,
+			APNSProductionChannelID:  cfg.Push.APNSProductionChannelID,
+			FCMChannelID:             cfg.Push.FCMChannelID,
+			HuaweiChannelID:          cfg.Push.HuaweiChannelID, XiaomiChannelID: cfg.Push.XiaomiChannelID,
+			OPPOChannelID: cfg.Push.OPPOChannelID, VivoChannelID: cfg.Push.VivoChannelID,
+			HonorChannelID: cfg.Push.HonorChannelID, MeizuChannelID: cfg.Push.MeizuChannelID,
+		}, nil)
+		if err != nil {
+			panic(err)
+		}
 	}
 	var mobilePushErr error
 	server.mobilePush, mobilePushErr = mobilepushapp.NewService(mobilepushapp.Dependencies{

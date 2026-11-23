@@ -1,7 +1,6 @@
 import type { AuthenticatedTarget } from "@/core/server-target"
 import { createAccountId } from "@/data/auth/account-store"
 
-export const PUSH_GATEWAY_URL = "https://push.jiying.chat"
 export const PUSH_GRANT_RENEWAL_WINDOW_MS = 7 * 24 * 60 * 60 * 1_000
 export const PUSH_REGISTRATION_REFRESH_MS = 24 * 60 * 60 * 1_000
 export const PUSH_ROUTE_RETENTION_MS = 7 * 24 * 60 * 60 * 1_000
@@ -10,16 +9,22 @@ const PUSH_ROUTE_RETRY_DELAYS_MS = [5_000, 30_000, 120_000, 300_000] as const
 
 export type PushEnvironment = "development" | "production"
 export type PushPlatform = "android" | "ios"
-export type PushProviderName = "apns" | "jpush"
+export type PushProviderName = "apns" | "fcm" | "huawei_hms" | "xiaomi_push" | "oppo_push" | "vivo_push" | "honor_push" | "meizu_push"
+export type PushProviderRegistration = {
+  provider: PushProviderName
+  token: string
+  environment?: PushEnvironment
+}
 
 export type PushInstallation = {
+	// Kept in SecureStore with the installation, never in the public retry queue.
+	handoffTokens?: string[]
   appVersion: string
-  environment: PushEnvironment
   installationId: string
-  managementToken: string
   platform: PushPlatform
-  provider: PushProviderName
-  providerToken: string
+  manufacturer: string
+  model: string
+  registrations: PushProviderRegistration[]
 }
 
 export type PushDelegationStatus =
@@ -34,6 +39,7 @@ export type PushAccountIdentity = {
 }
 
 export type PushDelegation = {
+	handoffToken?: string
   accountId: string
   expiresAt: string
   grantId: string
@@ -41,7 +47,6 @@ export type PushDelegation = {
   lastSyncedAt: string | null
   platform: PushPlatform
   privateRegistrationVersion?: number
-  sendToken: string
   status: PushDelegationStatus
   target: AuthenticatedTarget
 }
@@ -50,7 +55,6 @@ export type PendingPushRevocation = {
   accountId: string
   grantId: string
   installationId: string
-  gatewayRevoked?: boolean
   privateRevoked?: boolean
   queuedAt: string
   target: AuthenticatedTarget
@@ -115,7 +119,6 @@ export function pushSynchronizationShouldRetry(error: unknown) {
     code === "grant_limit_reached" ||
     code === "unauthorized" ||
     code === "invalid_request" ||
-    code === "jpush_consent_required" ||
     code === "push_user_disabled" ||
     code === "android_provider_unavailable" ||
     code === "unsupported_provider"
@@ -140,7 +143,7 @@ export function parsePushNotificationData(
   value: unknown
 ): PushNotificationData | null {
   if (!isRecord(value)) return null
-  const event = value.event
+  const event = value.event === "message_created" ? "message.created" : value.event
   const grantId = value.grant_id
   const routeToken = value.route_token
   if (
@@ -159,35 +162,30 @@ export function parsePushNotificationData(
   }
 }
 
+export function parseProviderRegistrations(value: unknown, platform: PushPlatform): PushProviderRegistration[] | null {
+  if (!Array.isArray(value) || value.length > 8) return null
+  const seen = new Set<string>()
+  const result: PushProviderRegistration[] = []
+  for (const registration of value) {
+    if (!isRecord(registration) || typeof registration.provider !== "string" || typeof registration.token !== "string" || !registration.token || registration.token.length > 8192 || seen.has(registration.provider)) return null
+    const provider = registration.provider
+    if (platform === "ios") {
+      if (provider !== "apns" || (registration.environment !== "development" && registration.environment !== "production")) return null
+    } else if (!["fcm", "huawei_hms", "xiaomi_push", "oppo_push", "vivo_push", "honor_push", "meizu_push"].includes(provider) || registration.environment !== undefined) return null
+    seen.add(provider)
+    result.push({ provider: provider as PushProviderName, token: registration.token, ...(platform === "ios" ? { environment: registration.environment as PushEnvironment } : {}) })
+  }
+  return result.sort((a, b) => a.provider.localeCompare(b.provider))
+}
+
 export function parsePushInstallation(value: unknown): PushInstallation | null {
-  if (!isRecord(value)) return null
-  const platform = value.platform === "android" ? "android" : "ios"
-  const provider = value.provider === "jpush" ? "jpush" : "apns"
-  if (
-    typeof value.appVersion !== "string" ||
-    (value.environment !== "development" &&
-      value.environment !== "production") ||
-    typeof value.installationId !== "string" ||
-    !value.installationId ||
-    typeof value.managementToken !== "string" ||
-    !value.managementToken ||
-    typeof value.providerToken !== "string" ||
-    !value.providerToken ||
-    (platform === "ios" && provider !== "apns") ||
-    (platform === "android" && provider !== "jpush") ||
-    (provider === "jpush" && value.environment !== "production")
-  ) {
-    return null
-  }
-  return {
-    appVersion: value.appVersion,
-    environment: value.environment,
-    installationId: value.installationId,
-    managementToken: value.managementToken,
-    platform,
-    provider,
-    providerToken: value.providerToken,
-  }
+  if (!isRecord(value) || (value.platform !== "ios" && value.platform !== "android")) return null
+  const registrations = parseProviderRegistrations(value.registrations, value.platform)
+  if (!registrations || typeof value.appVersion !== "string" || typeof value.installationId !== "string" || !value.installationId || typeof value.manufacturer !== "string" || typeof value.model !== "string") return null
+  const tokens = value.handoffTokens
+  if (tokens !== undefined && (!Array.isArray(tokens) || tokens.length > 10 || !tokens.every((token) => typeof token === "string" && /^mph_[A-Za-z0-9_-]{17,4092}$/.test(token)))) return null
+  return { appVersion: value.appVersion, installationId: value.installationId, platform: value.platform, manufacturer: value.manufacturer, model: value.model, registrations,
+    ...(tokens !== undefined ? { handoffTokens: tokens as string[] } : {}) }
 }
 
 export function parsePushDelegation(value: unknown): PushDelegation | null {
@@ -201,8 +199,6 @@ export function parsePushDelegation(value: unknown): PushDelegation | null {
     typeof value.installationId !== "string" ||
     !value.installationId ||
     (value.lastSyncedAt !== null && typeof value.lastSyncedAt !== "string") ||
-    typeof value.sendToken !== "string" ||
-    !value.sendToken ||
     (value.status !== "pending_registration" &&
       value.status !== "pending_revocation" &&
       value.status !== "registered")
@@ -210,6 +206,7 @@ export function parsePushDelegation(value: unknown): PushDelegation | null {
     return null
   }
   return {
+    ...(typeof value.handoffToken === "string" && /^mph_[A-Za-z0-9_-]{17,4092}$/.test(value.handoffToken) ? { handoffToken: value.handoffToken } : {}),
     accountId: typeof value.accountId === "string" && value.accountId
       ? value.accountId : createAccountId(value.target.url, value.target.userId),
     expiresAt: value.expiresAt,
@@ -222,7 +219,6 @@ export function parsePushDelegation(value: unknown): PushDelegation | null {
       Number.isInteger(value.privateRegistrationVersion)
         ? value.privateRegistrationVersion
         : 1,
-    sendToken: value.sendToken,
     status: value.status,
     target: value.target,
   }
@@ -235,7 +231,7 @@ export function parsePendingPushRevocation(value: unknown): PendingPushRevocatio
     typeof value.installationId !== "string" || !value.installationId ||
     typeof value.queuedAt !== "string" || !Number.isFinite(Date.parse(value.queuedAt))) return null
   return { accountId: value.accountId, grantId: value.grantId, installationId: value.installationId,
-    gatewayRevoked: value.gatewayRevoked === true, privateRevoked: value.privateRevoked === true,
+    privateRevoked: value.privateRevoked === true,
     queuedAt: value.queuedAt, target: value.target }
 }
 

@@ -4,12 +4,6 @@ import test from "node:test"
 
 import type { ApiFetch } from "@/data/api-client"
 import {
-  createActivePushGrant,
-  getGatewayDeliveryStatus,
-  registerPushInstallation,
-  renewPushGrant,
-} from "@/notifications/push-gateway-api"
-import {
   getPushDeliveryStatus,
   getPushPreferences,
   reportPushPresence,
@@ -22,12 +16,23 @@ import {
   isPendingPushRouteExpired,
   parsePendingPushRouteQueue,
   parsePushDelegation,
+  parsePushInstallation,
   parsePushNotificationData,
   pushSynchronizationShouldRetry,
   shouldRefreshPrivateRegistration,
   shouldRenewPushGrant,
   targetsMatch,
 } from "@/notifications/push-types"
+
+test("secure push state retains handoff capabilities and rejects malformed queues", () => {
+  const ticket = "mph_" + "h".repeat(43)
+  const installation = { installationId: "installation", appVersion: "1", platform: "android", manufacturer: "Google", model: "Pixel", registrations: [{ provider: "fcm", token: "fcm-token" }], handoffTokens: [ticket] }
+  assert.deepEqual(parsePushInstallation(installation)?.handoffTokens, [ticket])
+  assert.equal(parsePushInstallation({ ...installation, handoffTokens: ["invalid"] }), null)
+  assert.equal(parsePushInstallation({ ...installation, handoffTokens: Array(11).fill(ticket) }), null)
+  const delegation = parsePushDelegation({ accountId: "account", expiresAt: "2099-01-01T00:00:00Z", grantId: "grant", installationId: "installation", lastSyncedAt: null, platform: "android", status: "registered", target: { id: "server", url: "https://example.com", userId: "user" }, handoffToken: ticket })
+  assert.equal(delegation?.handoffToken, ticket)
+})
 
 test("legacy delegations require the current private registration version", () => {
   const parsed = parsePushDelegation({
@@ -143,78 +148,8 @@ test("calculates grant renewal, registration refresh, and route expiration", () 
   )
 })
 
-test("uses the fixed public gateway and installation authorization", async () => {
-  const requests: Array<{ init?: RequestInit; url: string }> = []
-  const responses = [
-    {
-      data: {
-        installation_id: "installation-1",
-        management_token: "management-token",
-      },
-      success: true,
-    },
-    {
-      data: {
-        expires_at: "2026-09-27T00:00:00Z",
-        grant_id: "grant-1",
-        send_token: "send-token",
-      },
-      success: true,
-    },
-    {
-      data: {
-        expires_at: "2026-10-27T00:00:00Z",
-        grant_id: "grant-1",
-      },
-      success: true,
-    },
-  ]
-  const fetcher: ApiFetch = async (url, init) => {
-    requests.push({ init, url })
-    return Response.json(responses.shift(), { status: 201 })
-  }
-
-  const installation = await registerPushInstallation(
-    {
-      appVersion: "1.2.0",
-      environment: "development",
-      platform: "ios",
-      provider: "apns",
-      providerToken: "apns-token",
-    },
-    { fetcher }
-  )
-  const grant = await createActivePushGrant(
-    installation.installationId,
-    installation.managementToken,
-    { fetcher }
-  )
-  const renewed = await renewPushGrant(
-    grant.grantId,
-    installation.managementToken,
-    { fetcher }
-  )
-
-  assert.equal(
-    requests[0]?.url,
-    "https://push.jiying.chat/api/v1/installations"
-  )
-  assert.deepEqual(JSON.parse(String(requests[0]?.init?.body)), {
-    app_version: "1.2.0",
-    environment: "development",
-    platform: "ios",
-    provider: "apns",
-    provider_token: "apns-token",
-  })
-  assert.equal(
-    new Headers(requests[1]?.init?.headers).get("authorization"),
-    "Installation management-token"
-  )
-  assert.equal(renewed.expiresAt, "2026-10-27T00:00:00Z")
-})
-
 test("push policy uses the current authenticated server without client-supplied user/session IDs", async () => {
-  const requests: Array<{ init?: RequestInit; url: string }> = []
+  const requests: { init?: RequestInit; url: string }[] = []
   const target = { id: "policy-server", url: "https://private.example", userId: "policy-user" }
   installTestAccountRuntime(target)
   const fetcher: ApiFetch = async (url, init) => {
@@ -233,33 +168,15 @@ test("push policy uses the current authenticated server without client-supplied 
   assert.ok(requests.every((request) => !String(request.init?.body).includes("user_id") && !String(request.init?.body).includes("session_id")))
 })
 
-test("gateway delivery diagnostics use installation management credentials, never account bearer credentials", async () => {
-  let authorization = "", requestUrl = ""
-  const result = await getGatewayDeliveryStatus("grant-1", "management-token", { fetcher: async (url, init) => {
-    requestUrl = url
-    authorization = new Headers(init?.headers).get("authorization") ?? ""
-    return Response.json({ success: true, data: { grant_status: "active", installation_status: "active", provider: "apns", environment: "production", last_job: { status: "accepted", reason: "", updated_at: "2026-10-14T00:00:00Z" } } })
-  } })
-  assert.equal(requestUrl, "https://push.jiying.chat/api/v1/grants/grant-1/status")
-  assert.equal(authorization, "Installation management-token")
-  assert.equal(result.last_job?.status, "accepted")
-})
-
-test("malformed gateway diagnostics fail safely instead of crashing the settings screen", async () => {
-  await assert.rejects(getGatewayDeliveryStatus("grant-1", "management-token", {
-    fetcher: async () => Response.json({ success: true, data: { provider: 123 } }),
-  }), /推送状态响应格式不正确/)
-})
-
 test("registers grants and resolves routes only through the mapped private server", async () => {
-  const requests: Array<{ init?: RequestInit; url: string }> = []
+  const requests: { init?: RequestInit; url: string }[] = []
   const target = {
     id: "server-1",
     url: "https://private.example/",
     userId: "user-1",
   }
   const responses = [
-    { data: {}, success: true },
+    { data: { handoff_token: "mph_" + "b".repeat(43) }, success: true },
     {
       data: {
         conversation_id: "conversation-1",
@@ -273,18 +190,19 @@ test("registers grants and resolves routes only through the mapped private serve
     return Response.json(responses.shift(), { status: 200 })
   }
   installTestAccountRuntime(target)
-  await registerPrivatePushGrant(
+  const registered = await registerPrivatePushGrant(
     target,
     {
+      accountId: "account-1",
       expiresAt: "2026-09-27T00:00:00Z",
       grantId: "grant-1",
       installationId: "installation-1",
       lastSyncedAt: null,
       platform: "ios",
-      sendToken: "send-token",
       status: "pending_registration",
       target,
     },
+    { appVersion: "1", installationId: "installation-1", platform: "ios", manufacturer:"Apple", model:"iPhone", registrations:[{provider:"apns",token:"native-token",environment:"production"}], handoffTokens:["mph_"+"a".repeat(43)] },
     { fetcher }
   )
   const route = await resolvePrivatePushRoute(target, "r".repeat(43), {
@@ -296,6 +214,14 @@ test("registers grants and resolves routes only through the mapped private serve
     "https://private.example/api/client/push/grants"
   )
   assert.equal(requests[0]?.init?.credentials, "omit")
+  const registration = JSON.parse(String(requests[0]?.init?.body))
+  assert.deepEqual(registration.handoff_tokens, ["mph_"+"a".repeat(43)])
+  assert.equal(registered.handoffToken, "mph_"+"b".repeat(43))
+  assert.deepEqual(registration.registrations, [{provider:"apns",token:"native-token",environment:"production"}])
+  assert.equal(registration.manufacturer,"Apple")
+  assert.equal("provider" in registration,false)
+  assert.equal("send_token" in registration, false)
+  assert.equal(parsePushNotificationData({ event: "message_created", grant_id: "grant-1", route_token: "r".repeat(43) })?.event, "message.created")
   assert.equal(
     requests[1]?.url,
     "https://private.example/api/client/push/routes/resolve"

@@ -86,11 +86,12 @@ assert_contains "compose.yml" 'LLM_API_KEY: ${LLM_API_KEY:-change-me}'
 assert_contains "compose.yml" 'LLM_MODEL_NAME: ${LLM_MODEL_NAME:-change-me}'
 assert_contains "compose.yml" 'MCP_GATEWAY_URL: ${MCP_GATEWAY_URL:-https://mcp.example.com/mcp}'
 assert_contains "compose.yml" 'MCP_GATEWAY_KEY: ${MCP_GATEWAY_KEY:-change-me}'
-assert_contains "compose.yml" 'PUSH_GATEWAY_SERVER_KEY: ${PUSH_GATEWAY_SERVER_KEY:-}'
+assert_contains "compose.yml" 'PUSH_SERVICE_CREDENTIAL: ${PUSH_SERVICE_CREDENTIAL:-}'
 assert_contains "compose.yml" './data/server/push:/app/data/push'
 assert_not_contains "compose.yml" "PUSH_CREDENTIAL_KEY_FILE"
 assert_not_contains "compose.yml" "server-push-data"
-assert_not_contains "compose.yml" "PUSH_GATEWAY_ENABLED"
+assert_contains "compose.yml" 'PUSH_SERVICE_URL: ${PUSH_SERVICE_URL:-}'
+assert_contains "compose.yml" 'PUSH_FCM_CHANNEL_ID: ${PUSH_FCM_CHANNEL_ID:-}'
 assert_not_contains "compose.yml" "PUSH_CREDENTIAL_ENCRYPTION_KEY"
 assert_not_contains "compose.yml" "PUSH_CREDENTIAL_PREVIOUS_KEYS"
 assert_contains "compose.yml" 'S3_FORCE_PATH_STYLE: ${S3_FORCE_PATH_STYLE:-false}'
@@ -148,8 +149,9 @@ assert_contains ".env.example" "POSTGRES_DB=magic-chat"
 assert_contains ".env.example" "POSTGRES_USER=magic-chat"
 assert_contains ".env.example" "POSTGRES_HOST=postgres"
 assert_contains ".env.example" "ADMIN_PASSWORD=change-me"
-assert_contains ".env.example" "PUSH_GATEWAY_SERVER_KEY="
-assert_not_contains ".env.example" "PUSH_GATEWAY_ENABLED"
+assert_contains ".env.example" "PUSH_SERVICE_CREDENTIAL="
+assert_contains ".env.example" "PUSH_SERVICE_URL="
+assert_contains ".env.example" "PUSH_FCM_CHANNEL_ID="
 assert_not_contains ".env.example" "PUSH_CREDENTIAL_ENCRYPTION_KEY"
 assert_not_contains ".env.example" "PUSH_CREDENTIAL_PREVIOUS_KEYS"
 assert_contains ".env.example" "AWS_ENDPOINT_URL_S3=https://s3.example.com"

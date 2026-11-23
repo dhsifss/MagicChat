@@ -73,7 +73,7 @@ func (s *Service) fanoutEvent(ctx context.Context, event store.MobilePushEvent) 
 		}
 		var grants []store.UserPushGrant
 		if err := tx.Where(
-			"user_id IN ? AND status = ? AND expires_at > ?", eligibleUserIDs, GrantStatusActive, now,
+			"user_id IN ? AND status IN ? AND expires_at > ?", eligibleUserIDs, []string{GrantStatusActive, GrantStatusRegistering}, now,
 		).Find(&grants).Error; err != nil {
 			return err
 		}

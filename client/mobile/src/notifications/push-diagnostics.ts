@@ -3,7 +3,6 @@ import type { PushAccountIdentity } from "@/notifications/push-types"
 export type PushRegistrationStage =
   | "permission"
   | "device_token"
-  | "gateway"
   | "private_server"
 export type PushRegistrationDiagnostic = {
   accountId: string | null
@@ -52,7 +51,6 @@ export const PUSH_REGISTRATION_STAGE_LABELS: Record<
 > = {
   permission: "系统通知权限",
   device_token: "获取系统推送 Token",
-  gateway: "推送网关注册与授权",
   private_server: "当前服务器绑定",
 }
 

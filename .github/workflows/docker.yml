@@ -23,13 +23,13 @@ jobs:
       postgres:
         image: postgres:16-alpine
         env:
-          POSTGRES_DB: push_gateway
-          POSTGRES_PASSWORD: push_gateway
-          POSTGRES_USER: push_gateway
+          POSTGRES_DB: magicchat_test
+          POSTGRES_USER: magicchat_test
+          POSTGRES_PASSWORD: magicchat_test
         ports:
           - 5432:5432
         options: >-
-          --health-cmd "pg_isready -U push_gateway -d push_gateway"
+          --health-cmd "pg_isready -U magicchat_test -d magicchat_test"
           --health-interval 10s
           --health-timeout 5s
           --health-retries 5
@@ -44,17 +44,16 @@ jobs:
           cache-dependency-path: |
             server/go.sum
             assistant/go.sum
-            push-gateway/go.sum
 
       - name: Test server
         working-directory: server
         run: go test ./...
 
-      - name: Test Push Gateway
-        working-directory: push-gateway
+      - name: Test push PostgreSQL contracts
+        working-directory: server
         env:
-          POSTGRES_TEST_DSN: postgres://push_gateway:push_gateway@127.0.0.1:5432/push_gateway?sslmode=disable
-        run: go test ./...
+          POSTGRES_TEST_DSN: postgres://magicchat_test:magicchat_test@127.0.0.1:5432/magicchat_test?sslmode=disable
+        run: go test -race ./internal/application/mobilepush -count=1
 
       - name: Test MagicChat AI assistant
         working-directory: assistant
@@ -73,7 +72,6 @@ jobs:
           cache-dependency-path: |
             client/web/pnpm-lock.yaml
             client/admin/pnpm-lock.yaml
-            push-gateway-web/pnpm-lock.yaml
             document-server/pnpm-lock.yaml
 
       - name: Verify client web
@@ -87,15 +85,6 @@ jobs:
 
       - name: Verify admin web
         working-directory: client/admin
-        run: |
-          pnpm install --frozen-lockfile
-          pnpm test
-          pnpm typecheck
-          pnpm lint
-          pnpm build
-
-      - name: Verify Push Gateway web
-        working-directory: push-gateway-web
         run: |
           pnpm install --frozen-lockfile
           pnpm test
@@ -154,10 +143,6 @@ jobs:
               SITE_URL=https://jiying.chat
               PUBLIC_BASE_PATH=/
               PUBLIC_GA_ID=${{ vars.HOMEPAGE_GA_ID }}
-          - image: push-gateway
-            context: .
-            dockerfile: push-gateway/Dockerfile
-            build_args: ""
     steps:
       - name: Checkout
         uses: actions/checkout@v7

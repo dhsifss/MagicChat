@@ -23,18 +23,9 @@ import { createPushRevocationQueueStore } from "@/notifications/push-revocation-
 const INSTALLATION_KEY = "magicchat.push.installation.v1"
 const DELEGATION_KEY = "magicchat.push.delegation.v1"
 const PENDING_ROUTE_KEY = "magicchat.push.pending-route.v1"
-const JPUSH_CONSENT_KEY = "magicchat.push.jpush-consent.v1"
 const PUSH_REMINDER_KEY = "magicchat.push.reminder.v1"
 const secureStoreOptions: SecureStore.SecureStoreOptions = {
   keychainAccessible: SecureStore.WHEN_UNLOCKED_THIS_DEVICE_ONLY,
-}
-
-export async function loadJPushConsent() {
-  return (await loadSecureValue(JPUSH_CONSENT_KEY, parseBoolean)) ?? false
-}
-
-export async function saveJPushConsent(value: boolean) {
-  await saveSecureValue(JPUSH_CONSENT_KEY, value)
 }
 
 export async function loadPushReminderState() {
@@ -114,9 +105,6 @@ export async function replacePendingPushRoutes(values: PendingPushRoute[]) {
   )
 }
 
-function parseBoolean(value: unknown) {
-  return typeof value === "boolean" ? value : null
-}
 
 async function loadSecureValue<T>(
   key: string,

@@ -5,11 +5,10 @@ import (
 	"time"
 )
 
-const GatewayURL = "https://push.jiying.chat"
-
 const (
-	GrantStatusActive   = "active"
-	GrantStatusDisabled = "disabled"
+	GrantStatusActive      = "active"
+	GrantStatusRegistering = "registering"
+	GrantStatusDisabled    = "disabled"
 
 	EventStatusQueued    = "queued"
 	EventStatusExpanding = "expanding"
@@ -25,7 +24,16 @@ const (
 	JobStatusSuppressed = "suppressed"
 )
 
+type ProviderRegistration struct {
+	Provider    string `json:"provider"`
+	Token       string `json:"token"`
+	Environment string `json:"environment,omitempty"`
+}
+
 type RegisterGrantCommand struct {
+	Manufacturer   string
+	Model          string
+	Registrations  []ProviderRegistration
 	UserID         string
 	SessionID      string
 	InstallationID string
@@ -33,6 +41,7 @@ type RegisterGrantCommand struct {
 	SendToken      string
 	Platform       string
 	ExpiresAt      time.Time
+	HandoffTokens  []string
 }
 
 type Grant struct {
@@ -40,6 +49,11 @@ type Grant struct {
 	GatewayGrantID string
 	Platform       string
 	ExpiresAt      time.Time
+	HandoffToken   string
+}
+
+type EndpointHandoffClient interface {
+	RedeemHandoffs(context.Context, []string) error
 }
 
 type Route struct {
@@ -48,10 +62,11 @@ type Route struct {
 }
 
 type NotificationRequest struct {
-	Event       string `json:"event"`
-	RouteToken  string `json:"route_token"`
-	CollapseKey string `json:"collapse_key,omitempty"`
-	TTLSeconds  int    `json:"ttl_seconds"`
+	Event       string    `json:"event"`
+	RouteToken  string    `json:"route_token"`
+	CollapseKey string    `json:"collapse_key,omitempty"`
+	TTLSeconds  int       `json:"ttl_seconds"`
+	ExpiresAt   time.Time `json:"-"`
 }
 
 type GatewayErrorKind string
@@ -77,6 +92,17 @@ func (e *GatewayError) Error() string {
 }
 
 func (e *GatewayError) Unwrap() error { return e.Err }
+
+type EndpointRegistrationPreparer interface {
+	PrepareRegistration(context.Context, RegisterGrantCommand) (string, error)
+}
+
+type EndpointClient interface {
+	// On failure, a nonempty reference contains registration settlement that
+	// must be committed before the error is returned to the client.
+	RegisterEndpoint(context.Context, RegisterGrantCommand) (string, error)
+	RevokeEndpoint(context.Context, string) error
+}
 
 type GatewayClient interface {
 	Send(context.Context, string, string, string, NotificationRequest) error

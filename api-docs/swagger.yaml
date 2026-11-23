@@ -1865,6 +1865,8 @@ definitions:
         type: string
       grant_id:
         type: string
+      handoff_token:
+        type: string
       installation_id:
         type: string
       platform:
@@ -1904,6 +1906,15 @@ definitions:
     required:
     - foreground
     - platform
+    type: object
+  client.pushProviderRegistrationRequest:
+    properties:
+      environment:
+        type: string
+      provider:
+        type: string
+      token:
+        type: string
     type: object
   client.pushRouteResponse:
     properties:
@@ -1947,12 +1958,22 @@ definitions:
         type: string
       grant_id:
         type: string
+      handoff_tokens:
+        items:
+          type: string
+        type: array
       installation_id:
+        type: string
+      manufacturer:
+        type: string
+      model:
         type: string
       platform:
         type: string
-      send_token:
-        type: string
+      registrations:
+        items:
+          $ref: '#/definitions/client.pushProviderRegistrationRequest'
+        type: array
     type: object
   client.requestEmailCodeRequest:
     properties:
@@ -8143,7 +8164,7 @@ paths:
           description: Service Unavailable
           schema:
             $ref: '#/definitions/client.errorEnvelope'
-      summary: 注册当前手机的公共推送授权
+      summary: 登记当前手机的推送设备
       tags:
       - 客户端推送
   /api/client/push/grants/{installation_id}/revoke:
@@ -8156,7 +8177,7 @@ paths:
         name: installation_id
         required: true
         type: string
-      - description: 待撤销的公共授权
+      - description: 待撤销的设备绑定
         in: body
         name: request
         required: true
@@ -8173,7 +8194,7 @@ paths:
           description: Unauthorized
           schema:
             $ref: '#/definitions/client.errorEnvelope'
-      summary: 删除当前手机的本地推送授权
+      summary: 注销当前手机的推送设备
       tags:
       - 客户端推送
   /api/client/push/preferences:

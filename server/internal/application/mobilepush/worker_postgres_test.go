@@ -172,12 +172,23 @@ func newPostgresPushTestService(t *testing.T) (*Service, *gorm.DB, time.Time) {
 	if err != nil {
 		t.Fatalf("open postgres: %v", err)
 	}
+	basePool, err := baseDB.DB()
+	if err != nil {
+		t.Fatalf("get postgres pool: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := basePool.Close(); err != nil {
+			t.Errorf("close postgres pool: %v", err)
+		}
+	})
 	schema := "mobile_push_test_" + strings.ReplaceAll(uuid.NewString(), "-", "")
 	if err := baseDB.Exec(`CREATE SCHEMA "` + schema + `"`).Error; err != nil {
 		t.Fatalf("create test schema: %v", err)
 	}
 	t.Cleanup(func() {
-		_ = baseDB.Exec(`DROP SCHEMA IF EXISTS "` + schema + `" CASCADE`).Error
+		if err := baseDB.Exec(`DROP SCHEMA IF EXISTS "` + schema + `" CASCADE`).Error; err != nil {
+			t.Errorf("drop postgres test schema: %v", err)
+		}
 	})
 	parsedDSN, err := url.Parse(baseDSN)
 	if err != nil {
@@ -190,6 +201,18 @@ func newPostgresPushTestService(t *testing.T) (*Service, *gorm.DB, time.Time) {
 	if err != nil {
 		t.Fatalf("open postgres schema: %v", err)
 	}
+	schemaPool, err := db.DB()
+	if err != nil {
+		t.Fatalf("get postgres schema pool: %v", err)
+	}
+	// Cleanups run in reverse order: stop fixture users, close the schema pool,
+	// drop the schema, then close the base pool. Register before migration so a
+	// fixture setup failure also releases its connections.
+	t.Cleanup(func() {
+		if err := schemaPool.Close(); err != nil {
+			t.Errorf("close postgres schema pool: %v", err)
+		}
+	})
 	if err := store.RunPostgresMigrations(db, "../../../migrations"); err != nil {
 		t.Fatalf("migrate postgres schema: %v", err)
 	}

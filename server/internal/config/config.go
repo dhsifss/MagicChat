@@ -1,11 +1,11 @@
 package config
 
 import (
-	"encoding/hex"
 	"fmt"
 	"net"
 	"net/url"
 	"os"
+	"regexp"
 	"strconv"
 	"strings"
 )
@@ -51,9 +51,19 @@ type ASRModelConfig struct {
 }
 
 type PushConfig struct {
-	Enabled                 bool
-	CredentialEncryptionKey []byte
-	ServerKey               string
+	Enabled                  bool
+	CredentialEncryptionKey  []byte
+	ServiceURL               string
+	ServiceCredential        string
+	APNSDevelopmentChannelID string
+	APNSProductionChannelID  string
+	FCMChannelID             string
+	HuaweiChannelID          string
+	XiaomiChannelID          string
+	OPPOChannelID            string
+	VivoChannelID            string
+	HonorChannelID           string
+	MeizuChannelID           string
 }
 
 type StorageConfig struct {
@@ -185,31 +195,43 @@ func loadDatabaseConfig() (DatabaseConfig, error) {
 }
 
 func loadPushConfig() (PushConfig, error) {
-	serverKey := strings.TrimSpace(os.Getenv("PUSH_GATEWAY_SERVER_KEY"))
-	if serverKey == "" {
+	credential := strings.TrimSpace(os.Getenv("PUSH_SERVICE_CREDENTIAL"))
+	origin := strings.TrimRight(strings.TrimSpace(os.Getenv("PUSH_SERVICE_URL")), "/")
+	if credential == "" && origin == "" {
 		return PushConfig{}, nil
 	}
-	if !validPushGatewayServerKey(serverKey) {
-		return PushConfig{}, fmt.Errorf("PUSH_GATEWAY_SERVER_KEY has an invalid format")
+	if !regexp.MustCompile(`^mpt_[0-9a-f]{32}\.[A-Za-z0-9_-]{43}$`).MatchString(credential) {
+		return PushConfig{}, fmt.Errorf("PUSH_SERVICE_CREDENTIAL has an invalid format")
 	}
-	credentialKey, err := loadOrCreatePushCredentialKey(defaultPushCredentialKeyFile)
+	u, err := url.Parse(origin)
+	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" || u.User != nil || u.Path != "" || u.RawQuery != "" || u.ForceQuery || u.Fragment != "" {
+		return PushConfig{}, fmt.Errorf("PUSH_SERVICE_URL must be an HTTP(S) origin")
+	}
+	cfg := PushConfig{Enabled: true, ServiceURL: origin, ServiceCredential: credential}
+	for name, target := range map[string]*string{
+		"PUSH_APNS_DEVELOPMENT_CHANNEL_ID": &cfg.APNSDevelopmentChannelID,
+		"PUSH_APNS_PRODUCTION_CHANNEL_ID":  &cfg.APNSProductionChannelID,
+		"PUSH_FCM_CHANNEL_ID":              &cfg.FCMChannelID,
+		"PUSH_HUAWEI_CHANNEL_ID":           &cfg.HuaweiChannelID,
+		"PUSH_XIAOMI_CHANNEL_ID":           &cfg.XiaomiChannelID,
+		"PUSH_OPPO_CHANNEL_ID":             &cfg.OPPOChannelID,
+		"PUSH_VIVO_CHANNEL_ID":             &cfg.VivoChannelID,
+		"PUSH_HONOR_CHANNEL_ID":            &cfg.HonorChannelID,
+		"PUSH_MEIZU_CHANNEL_ID":            &cfg.MeizuChannelID,
+	} {
+		*target = strings.TrimSpace(os.Getenv(name))
+		if *target != "" && !regexp.MustCompile(`^[0-9a-f]{32}$`).MatchString(*target) {
+			return PushConfig{}, fmt.Errorf("%s must be a 32 character lowercase hex ID", name)
+		}
+	}
+	if cfg.APNSDevelopmentChannelID == "" && cfg.APNSProductionChannelID == "" && cfg.FCMChannelID == "" && cfg.HuaweiChannelID == "" && cfg.XiaomiChannelID == "" && cfg.OPPOChannelID == "" && cfg.VivoChannelID == "" && cfg.HonorChannelID == "" && cfg.MeizuChannelID == "" {
+		return PushConfig{}, fmt.Errorf("at least one Push registration channel ID is required")
+	}
+	cfg.CredentialEncryptionKey, err = loadOrCreatePushCredentialKey(defaultPushCredentialKeyFile)
 	if err != nil {
 		return PushConfig{}, fmt.Errorf("load push credential key: %w", err)
 	}
-	return PushConfig{
-		Enabled:                 true,
-		CredentialEncryptionKey: credentialKey,
-		ServerKey:               serverKey,
-	}, nil
-}
-
-func validPushGatewayServerKey(value string) bool {
-	value = strings.TrimSpace(value)
-	if len(value) != 32 || value != strings.ToLower(value) {
-		return false
-	}
-	decoded, err := hex.DecodeString(value)
-	return err == nil && len(decoded) == 16
+	return cfg, nil
 }
 
 func loadStorageConfig() (StorageConfig, error) {

@@ -119,12 +119,14 @@ func TestLoadUsesEnvironmentDefaults(t *testing.T) {
 	}
 }
 
-func TestLoadEnablesPushFromServerKeyAndPersistsGeneratedCredentialKey(t *testing.T) {
+func TestLoadEnablesPushFromServiceCredentialAndPersistsGeneratedCredentialKey(t *testing.T) {
 	setRequiredEnvironment(t)
 	workingDirectory := t.TempDir()
 	t.Chdir(workingDirectory)
 	keyFile := filepath.Join(workingDirectory, defaultPushCredentialKeyFile)
-	t.Setenv("PUSH_GATEWAY_SERVER_KEY", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+	t.Setenv("PUSH_SERVICE_URL", "https://push.example.com")
+	t.Setenv("PUSH_APNS_PRODUCTION_CHANNEL_ID", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+	t.Setenv("PUSH_SERVICE_CREDENTIAL", "mpt_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")
 
 	first, err := Load()
 	if err != nil {
@@ -134,8 +136,8 @@ func TestLoadEnablesPushFromServerKeyAndPersistsGeneratedCredentialKey(t *testin
 	if err != nil {
 		t.Fatalf("second Load() error = %v", err)
 	}
-	if !first.Push.Enabled || first.Push.ServerKey != "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" {
-		t.Fatalf("Push configuration is invalid: enabled=%v has_server_key=%v", first.Push.Enabled, first.Push.ServerKey != "")
+	if !first.Push.Enabled || first.Push.ServiceCredential != "mpt_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" {
+		t.Fatalf("Push configuration is invalid: enabled=%v has_service_credential=%v", first.Push.Enabled, first.Push.ServiceCredential != "")
 	}
 	if len(first.Push.CredentialEncryptionKey) != 32 || !bytes.Equal(first.Push.CredentialEncryptionKey, second.Push.CredentialEncryptionKey) {
 		t.Fatal("generated push credential key was not persisted")
@@ -149,7 +151,7 @@ func TestLoadEnablesPushFromServerKeyAndPersistsGeneratedCredentialKey(t *testin
 	}
 }
 
-func TestLoadKeepsPushDisabledWithoutServerKey(t *testing.T) {
+func TestLoadKeepsPushDisabledWithoutServiceCredential(t *testing.T) {
 	setRequiredEnvironment(t)
 	workingDirectory := t.TempDir()
 	t.Chdir(workingDirectory)
@@ -167,10 +169,10 @@ func TestLoadKeepsPushDisabledWithoutServerKey(t *testing.T) {
 	}
 }
 
-func TestLoadRejectsInvalidPushServerKey(t *testing.T) {
+func TestLoadRejectsInvalidPushServiceCredential(t *testing.T) {
 	setRequiredEnvironment(t)
-	t.Setenv("PUSH_GATEWAY_SERVER_KEY", "invalid")
-	if _, err := Load(); err == nil || !strings.Contains(err.Error(), "PUSH_GATEWAY_SERVER_KEY") {
+	t.Setenv("PUSH_SERVICE_CREDENTIAL", "invalid")
+	if _, err := Load(); err == nil || !strings.Contains(err.Error(), "PUSH_SERVICE_CREDENTIAL") {
 		t.Fatalf("Load() error = %v", err)
 	}
 }
@@ -282,9 +284,41 @@ func setRequiredEnvironment(t *testing.T) {
 		"TEMPORARY_ASSETS_EXPIRE_DAYS":       "180",
 		"LARGE_TEMPORARY_ASSETS_EXPIRE_DAYS": "180",
 		"S3_ABORT_MULTIPART_DAYS":            "7",
-		"PUSH_GATEWAY_SERVER_KEY":            "",
+		"PUSH_SERVICE_CREDENTIAL":            "",
+		"PUSH_SERVICE_URL":                   "",
+		"PUSH_APNS_DEVELOPMENT_CHANNEL_ID":   "",
+		"PUSH_APNS_PRODUCTION_CHANNEL_ID":    "",
+		"PUSH_FCM_CHANNEL_ID":                "",
+		"PUSH_HUAWEI_CHANNEL_ID":             "",
+		"PUSH_XIAOMI_CHANNEL_ID":             "",
+		"PUSH_OPPO_CHANNEL_ID":               "",
+		"PUSH_VIVO_CHANNEL_ID":               "",
+		"PUSH_HONOR_CHANNEL_ID":              "",
+		"PUSH_MEIZU_CHANNEL_ID":              "",
 	}
 	for name, value := range values {
 		t.Setenv(name, value)
+	}
+}
+
+func TestPushConfigRejectsIncompleteOrUnsafeServiceSettings(t *testing.T) {
+	for _, test := range []struct{ name, value string }{
+		{"PUSH_SERVICE_URL", ""},
+		{"PUSH_SERVICE_URL", "https://user:password@push.example.com"},
+		{"PUSH_SERVICE_URL", "https://push.example.com/api"},
+		{"PUSH_SERVICE_URL", "https://push.example.com?token=secret"},
+		{"PUSH_APNS_PRODUCTION_CHANNEL_ID", "invalid"},
+		{"PUSH_APNS_PRODUCTION_CHANNEL_ID", ""},
+	} {
+		t.Run(test.name+test.value, func(t *testing.T) {
+			setRequiredEnvironment(t)
+			t.Setenv("PUSH_SERVICE_URL", "https://push.example.com")
+			t.Setenv("PUSH_SERVICE_CREDENTIAL", "mpt_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")
+			t.Setenv("PUSH_APNS_PRODUCTION_CHANNEL_ID", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+			t.Setenv(test.name, test.value)
+			if _, err := loadPushConfig(); err == nil {
+				t.Fatal("accepted invalid push configuration")
+			}
+		})
 	}
 }

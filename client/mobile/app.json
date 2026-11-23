@@ -50,8 +50,12 @@
       "./plugins/with-animated-webp",
       "./plugins/with-android-drawable-log-filter",
       "./plugins/with-pnpm-autolinking-cache",
-      "./plugins/with-jpush-vendor-channels",
-      "expo-notifications",
+      [
+        "expo-notifications",
+        {
+          "defaultChannel": "messages"
+        }
+      ],
       "./plugins/with-apns-environments",
       [
         "expo-media-library",
@@ -101,7 +105,8 @@
       ],
       "expo-status-bar",
       "expo-video",
-      "expo-image"
+      "expo-image",
+      "./plugins/with-vendor-push"
     ],
     "experiments": {
       "typedRoutes": true,

@@ -12,7 +12,6 @@ export type PushSynchronizationState =
   | "synchronizing"
   | "registered"
   | "permission_denied"
-  | "consent_required"
   | "user_disabled"
   | "provider_unavailable"
   | "temporarily_unavailable"
@@ -236,7 +235,6 @@ export function classifyPushSynchronizationError(
   error: unknown
 ): PushSynchronizationState {
   const code = readErrorCode(error)
-  if (code === "jpush_consent_required") return "consent_required"
   if (code === "push_user_disabled") return "user_disabled"
   if (
     code === "android_provider_unavailable" ||

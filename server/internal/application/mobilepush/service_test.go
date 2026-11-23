@@ -680,42 +680,55 @@ func TestReclaimedJobRejectsStaleWorker(t *testing.T) {
 }
 
 func TestStaleRevocationDoesNotDisableRotatedGrant(t *testing.T) {
-	service, db, gateway, now := newPushTestService(t)
-	user := insertPushUser(t, db, "rotated@example.com")
-	other := insertPushUser(t, db, "rotated-other@example.com")
-	conversation := insertPushConversation(t, db, user, other, now)
-	installationID := uuid.NewString()
-	oldGatewayGrantID := uuid.NewString()
-	_, _ = registerPushTestGrant(t, service, db, RegisterGrantCommand{
-		UserID: user.ID, InstallationID: installationID, GatewayGrantID: oldGatewayGrantID,
-		SendToken: "old-gateway-send-token-abcdefghijklmnopqrstuvwxyz", Platform: "ios", ExpiresAt: now.Add(time.Hour),
-	})
-	_ = enqueueTestMessage(service, MessageDelivery{
-		UserID: user.ID, ConversationID: conversation.ID, MessageID: uuid.NewString(),
-		SenderType: store.MessageSenderTypeUser, SenderID: other.ID,
-	})
-	claimed, err := service.claimJobs(t.Context(), 1)
-	if err != nil || len(claimed) != 1 {
-		t.Fatalf("claim = %#v, %v", claimed, err)
-	}
-	newGatewayGrantID := uuid.NewString()
-	_, err = registerPushTestGrant(t, service, db, RegisterGrantCommand{
-		UserID: user.ID, InstallationID: installationID, GatewayGrantID: newGatewayGrantID,
-		SendToken: "new-gateway-send-token-abcdefghijklmnopqrstuvwxyz", Platform: "ios", ExpiresAt: now.Add(time.Hour),
-	})
-	if err != nil {
-		t.Fatalf("rotate grant: %v", err)
-	}
-	gateway.err = &GatewayError{Kind: GatewayErrorRevoked, Code: "grant_revoked", StatusCode: 410}
-	if err := service.dispatchJob(t.Context(), claimed[0]); err != nil {
-		t.Fatalf("dispatch stale grant: %v", err)
-	}
-	var stored store.UserPushGrant
-	if err := db.First(&stored, "installation_id = ?", installationID).Error; err != nil {
-		t.Fatalf("load rotated grant: %v", err)
-	}
-	if stored.Status != GrantStatusActive || stored.GatewayGrantID != newGatewayGrantID {
-		t.Fatalf("rotated grant = %#v", stored)
+	for _, mode := range []string{"new_grant", "same_grant_new_binding"} {
+		t.Run(mode, func(t *testing.T) {
+			service, db, gateway, now := newPushTestService(t)
+			user := insertPushUser(t, db, "rotated@example.com")
+			other := insertPushUser(t, db, "rotated-other@example.com")
+			conversation := insertPushConversation(t, db, user, other, now)
+			installationID := uuid.NewString()
+			oldGatewayGrantID := uuid.NewString()
+			_, _ = registerPushTestGrant(t, service, db, RegisterGrantCommand{
+				UserID: user.ID, InstallationID: installationID, GatewayGrantID: oldGatewayGrantID,
+				SendToken: "old-gateway-send-token-abcdefghijklmnopqrstuvwxyz", Platform: "ios", ExpiresAt: now.Add(time.Hour),
+			})
+			_ = enqueueTestMessage(service, MessageDelivery{
+				UserID: user.ID, ConversationID: conversation.ID, MessageID: uuid.NewString(),
+				SenderType: store.MessageSenderTypeUser, SenderID: other.ID,
+			})
+			claimed, err := service.claimJobs(t.Context(), 1)
+			if err != nil || len(claimed) != 1 {
+				t.Fatalf("claim = %#v, %v", claimed, err)
+			}
+			newGatewayGrantID := uuid.NewString()
+			if mode == "same_grant_new_binding" {
+				newGatewayGrantID = oldGatewayGrantID
+			}
+			_, err = registerPushTestGrant(t, service, db, RegisterGrantCommand{
+				UserID: user.ID, InstallationID: installationID, GatewayGrantID: newGatewayGrantID,
+				SendToken: "new-gateway-send-token-abcdefghijklmnopqrstuvwxyz", Platform: "ios", ExpiresAt: now.Add(time.Hour),
+			})
+			if err != nil {
+				t.Fatalf("rotate grant: %v", err)
+			}
+			gateway.err = &GatewayError{Kind: GatewayErrorRevoked, Code: "grant_revoked", StatusCode: 410}
+			if mode == "same_grant_new_binding" {
+				gateway.err = nil
+			}
+			if err := service.dispatchJob(t.Context(), claimed[0]); err != nil {
+				t.Fatalf("dispatch stale grant: %v", err)
+			}
+			var stored store.UserPushGrant
+			if err := db.First(&stored, "installation_id = ?", installationID).Error; err != nil {
+				t.Fatalf("load rotated grant: %v", err)
+			}
+			if stored.Status != GrantStatusActive || stored.GatewayGrantID != newGatewayGrantID {
+				t.Fatalf("rotated grant = %#v", stored)
+			}
+			if mode == "same_grant_new_binding" && (len(gateway.calls) != 1 || gateway.calls[0].SendToken != "new-gateway-send-token-abcdefghijklmnopqrstuvwxyz") {
+				t.Fatal("claimed job did not refresh its rotated binding")
+			}
+		})
 	}
 }
 
@@ -796,7 +809,7 @@ func newPushTestService(t *testing.T) (*Service, *gorm.DB, *fakeGateway, time.Ti
 	if err := db.AutoMigrate(
 		&store.User{}, &store.Conversation{}, &store.ConversationMember{},
 		&store.Message{}, &store.MessageRegistry{}, &store.ConversationUserPreference{}, &store.ConversationTopic{}, &store.ConversationTopicParticipant{},
-		&store.UserSession{}, &store.UserPushGrant{}, &store.UserPushPresence{}, &store.UserPushPreference{}, &store.MobilePushRoute{}, &store.MobilePushEvent{}, &store.MobilePushJob{},
+		&store.MobilePushEndpointRevocation{}, &store.UserSession{}, &store.UserPushGrant{}, &store.UserPushPresence{}, &store.UserPushPreference{}, &store.MobilePushRoute{}, &store.MobilePushEvent{}, &store.MobilePushJob{},
 	); err != nil {
 		t.Fatalf("migrate: %v", err)
 	}

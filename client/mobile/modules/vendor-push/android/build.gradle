@@ -1,0 +1,51 @@
+plugins {
+  id 'com.android.library'
+  id 'expo-module-gradle-plugin'
+}
+group = 'cloud.baizhi'
+version = '1.0.0'
+
+def value = { String name -> System.getenv("PUSH_${name}")?.trim() ?: '' }
+def channels = [
+  huawei: [provider: 'huawei_hms', fields: ['HUAWEI_APP_ID', 'HUAWEI_AGCONNECT_SERVICES'], sdk: 'com.huawei.hms:push:6.13.0.301'],
+  honor: [provider: 'honor_push', fields: ['HONOR_APP_ID'], sdk: 'com.hihonor.mcs:push:8.0.12.307'],
+  // These Maven Central artifacts contain the original OEM SDK binaries only.
+  xiaomi: [provider: 'xiaomi_push', fields: ['XIAOMI_APP_ID', 'XIAOMI_APP_KEY'], sdk: 'com.umeng.umsdk:xiaomi-push:7.12.4'],
+  oppo: [provider: 'oppo_push', fields: ['OPPO_APP_KEY', 'OPPO_APP_SECRET'], sdk: 'com.umeng.umsdk:oppo-push:3.7.1'],
+  vivo: [provider: 'vivo_push', fields: ['VIVO_APP_ID', 'VIVO_APP_KEY'], sdk: 'com.umeng.umsdk:vivo-push:4.1.3.0'],
+  meizu: [provider: 'meizu_push', fields: ['MEIZU_APP_ID', 'MEIZU_APP_KEY'], sdk: 'com.meizu.flyme.internet:push-internal:5.0.3'],
+]
+def enabled = channels.findAll { name, channel ->
+  def provided = channel.fields.count { !value(it).isEmpty() }
+  if (provided != 0 && provided != channel.fields.size()) throw new GradleException("Incomplete ${name} push SDK configuration")
+  provided != 0
+}
+android {
+  namespace 'cloud.baizhi.push'
+  buildFeatures { buildConfig true }
+  defaultConfig {
+    versionCode 1
+    versionName '1.0.0'
+    buildConfigField 'String', 'PUSH_PROVIDERS', groovy.json.JsonOutput.toJson(enabled.values().collect { it.provider }.join(','))
+    channels.values().collectMany { it.fields }.unique().findAll { !it.endsWith('SERVICES') }.each { name ->
+      buildConfigField 'String', name, groovy.json.JsonOutput.toJson(value(name))
+    }
+    manifestPlaceholders += [
+      HUAWEI_APP_ID: "appid=${value('HUAWEI_APP_ID')}", HONOR_APP_ID: value('HONOR_APP_ID'),
+      VIVO_APP_ID: value('VIVO_APP_ID'), VIVO_APP_KEY: value('VIVO_APP_KEY'),
+    ]
+    consumerProguardFiles 'consumer-rules.pro'
+  }
+  sourceSets {
+    enabled.each { name, channel ->
+      main.java.srcDir "src/${name}/java"
+      main.res.srcDir "src/${name}/res"
+    }
+  }
+}
+dependencies {
+  enabled.each { name, channel -> implementation channel.sdk }
+  testImplementation 'junit:junit:4.13.2'
+  testImplementation 'org.robolectric:robolectric:4.16.1'
+  testImplementation channels.xiaomi.sdk
+}

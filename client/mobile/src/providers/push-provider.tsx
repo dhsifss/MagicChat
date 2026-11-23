@@ -1,18 +1,13 @@
 import * as Notifications from "expo-notifications"
+import { addVendorPushRegistrationListener, addVendorNotificationResponseListener, getLastVendorNotificationResponse, clearLastVendorNotificationResponse } from "@/notifications/vendor-push-registration"
 import { useRouter, type Href } from "expo-router"
 import { useEffect, useMemo, useRef, useState } from "react"
 import { AppState, Platform } from "react-native"
 import { createPushPresenceReporter, PUSH_PRESENCE_HEARTBEAT_MS } from "../../../shared/push-presence"
-import { reportPushPresence } from "@/notifications/push-private-server-api"
+import { reportPushPresence, resolvePrivatePushRoute } from "@/notifications/push-private-server-api"
 
 import { ApiRequestError } from "@/data/api-client"
-import {
-  addJPushNotificationResponseListener,
-  clearLastJPushNotificationResponse,
-  getLastJPushNotificationResponse,
-} from "@/notifications/jpush-registration"
 import { PushNotificationCoordinator } from "@/notifications/push-notification-coordinator"
-import { resolvePrivatePushRoute } from "@/notifications/push-private-server-api"
 import {
   consumePendingPushRoute,
   enqueuePendingPushRoute,
@@ -60,10 +55,13 @@ export function PushProvider({ children }: React.PropsWithChildren) {
   )
   const routeRetryCountRef = useRef(0)
   const presenceReadyRef = useRef(false)
-  presenceReadyRef.current = realtimeReady && isMessageBootstrapComplete
   const presenceReporterRef = useRef<ReturnType<typeof createPushPresenceReporter> | null>(null)
   const presenceRequestQueueRef = useRef(Promise.resolve())
   const [routeAttempt, setRouteAttempt] = useState(0)
+
+  useEffect(() => {
+    presenceReadyRef.current = realtimeReady && isMessageBootstrapComplete
+  }, [realtimeReady, isMessageBootstrapComplete])
 
   useEffect(() => {
     const platform = Platform.OS
@@ -167,21 +165,26 @@ export function PushProvider({ children }: React.PropsWithChildren) {
       }
     )
     const pushTokenSubscription =
-      Platform.OS === "ios"
+      (Platform.OS === "ios" || Platform.OS === "android")
         ? Notifications.addPushTokenListener((token) => {
             if (
               currentIdentity &&
               isCurrentPushIdentity(currentIdentity) &&
-              token.type === "ios" &&
+              (token.type === "ios" || token.type === "android") &&
               typeof token.data === "string"
             ) {
               pushCoordinator.triggerSynchronization(token.data)
             }
           })
         : null
+    const vendorPushSubscription = Platform.OS === "android"
+      ? addVendorPushRegistrationListener(() => {
+          if (currentIdentity && isCurrentPushIdentity(currentIdentity)) pushCoordinator.triggerSynchronization()
+        }) : undefined
     return () => {
       appStateSubscription.remove()
       pushTokenSubscription?.remove()
+      vendorPushSubscription?.remove()
     }
   }, [identity, isAuthenticated, isSigningOut, pushCoordinator])
 
@@ -216,8 +219,8 @@ export function PushProvider({ children }: React.PropsWithChildren) {
           identifier: response.notification.request.identifier.trim(),
         })
       })
-    const jpushResponseSubscription =
-      addJPushNotificationResponseListener(processResponse)
+    const vendorResponseSubscription = addVendorNotificationResponseListener(processResponse)
+    void getLastVendorNotificationResponse().then((response) => { if (response) processResponse(response) }).catch(() => undefined)
     void Notifications.getLastNotificationResponseAsync()
       .then((response) => {
         if (!response) return
@@ -228,14 +231,9 @@ export function PushProvider({ children }: React.PropsWithChildren) {
         })
       })
       .catch(() => undefined)
-    void getLastJPushNotificationResponse()
-      .then((response) => {
-        if (response) processResponse(response)
-      })
-      .catch(() => undefined)
     return () => {
       responseSubscription.remove()
-      jpushResponseSubscription?.remove()
+      vendorResponseSubscription?.remove()
     }
   }, [
     isAuthenticated,
@@ -254,7 +252,7 @@ export function PushProvider({ children }: React.PropsWithChildren) {
 }
 
 function clearLastNotificationResponse() {
-  void clearLastJPushNotificationResponse().catch(() => undefined)
+  clearLastVendorNotificationResponse()
   try {
     Notifications.clearLastNotificationResponse()
   } catch {

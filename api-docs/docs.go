@@ -9295,7 +9295,7 @@ const docTemplate = `{
                 "tags": [
                     "客户端推送"
                 ],
-                "summary": "注册当前手机的公共推送授权",
+                "summary": "登记当前手机的推送设备",
                 "parameters": [
                     {
                         "description": "推送授权",
@@ -9367,7 +9367,7 @@ const docTemplate = `{
                 "tags": [
                     "客户端推送"
                 ],
-                "summary": "删除当前手机的本地推送授权",
+                "summary": "注销当前手机的推送设备",
                 "parameters": [
                     {
                         "type": "string",
@@ -9377,7 +9377,7 @@ const docTemplate = `{
                         "required": true
                     },
                     {
-                        "description": "待撤销的公共授权",
+                        "description": "待撤销的设备绑定",
                         "name": "request",
                         "in": "body",
                         "required": true,
@@ -12805,6 +12805,9 @@ const docTemplate = `{
                 "grant_id": {
                     "type": "string"
                 },
+                "handoff_token": {
+                    "type": "string"
+                },
                 "installation_id": {
                     "type": "string"
                 },
@@ -12863,6 +12866,20 @@ const docTemplate = `{
                         "android",
                         "desktop"
                     ]
+                }
+            }
+        },
+        "client.pushProviderRegistrationRequest": {
+            "type": "object",
+            "properties": {
+                "environment": {
+                    "type": "string"
+                },
+                "provider": {
+                    "type": "string"
+                },
+                "token": {
+                    "type": "string"
                 }
             }
         },
@@ -12931,14 +12948,29 @@ const docTemplate = `{
                 "grant_id": {
                     "type": "string"
                 },
+                "handoff_tokens": {
+                    "type": "array",
+                    "items": {
+                        "type": "string"
+                    }
+                },
                 "installation_id": {
+                    "type": "string"
+                },
+                "manufacturer": {
+                    "type": "string"
+                },
+                "model": {
                     "type": "string"
                 },
                 "platform": {
                     "type": "string"
                 },
-                "send_token": {
-                    "type": "string"
+                "registrations": {
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/definitions/client.pushProviderRegistrationRequest"
+                    }
                 }
             }
         },
