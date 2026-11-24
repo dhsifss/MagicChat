@@ -1954,6 +1954,8 @@ definitions:
     type: object
   client.registerPushGrantRequest:
     properties:
+      client_id:
+        type: string
       expires_at:
         type: string
       grant_id:

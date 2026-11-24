@@ -214,14 +214,21 @@ func (s *grantService) register(ctx context.Context, cmd RegisterGrantCommand, p
 				if errors.As(err, &upstream) && upstream.Code == "push_channel_unavailable" {
 					registrationErr = failure("unsupported_provider", "当前服务器未配置此设备的推送通道")
 				}
-				if _, ok := decodePushBinding(endpointID); !prepare && ok {
-					// Preserve confirmed rejections before returning the registration
-					// error. Rolling back would leave cleanup replaying an unusable plan.
+				if errors.As(err, &upstream) && upstream.Code == "client_channel_ambiguous" {
+					registrationErr = failure("push_channel_ambiguous", "推送平台存在多个匹配当前客户端的厂商配置，请联系管理员")
+				}
+				if prepared, ok := decodePushBinding(endpointID); !prepare && ok {
+					// Commit recovery decisions before returning the error: confirmed
+					// rejections and identity-change retirement must survive retries.
 					ciphertext, encryptErr := s.cipher.Encrypt(endpointID, []byte(stored.ID))
 					if encryptErr != nil {
 						return encryptErr
 					}
-					return tx.Model(&stored).Updates(map[string]any{"send_token_ciphertext": ciphertext, "updated_at": now}).Error
+					updates := map[string]any{"send_token_ciphertext": ciphertext, "updated_at": now}
+					if prepared.RetirementPending {
+						updates["status"] = GrantStatusRegistering
+					}
+					return tx.Model(&stored).Updates(updates).Error
 				}
 				return registrationErr
 			}

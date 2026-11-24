@@ -96,6 +96,7 @@ export async function registerPrivatePushGrant(
     "/api/client/push/grants",
     {
       body: JSON.stringify({
+        client_id: installation.clientId,
         expires_at: delegation.expiresAt,
         grant_id: delegation.grantId,
         installation_id: delegation.installationId,

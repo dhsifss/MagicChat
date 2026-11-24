@@ -224,9 +224,6 @@ func loadPushConfig() (PushConfig, error) {
 			return PushConfig{}, fmt.Errorf("%s must be a 32 character lowercase hex ID", name)
 		}
 	}
-	if cfg.APNSDevelopmentChannelID == "" && cfg.APNSProductionChannelID == "" && cfg.FCMChannelID == "" && cfg.HuaweiChannelID == "" && cfg.XiaomiChannelID == "" && cfg.OPPOChannelID == "" && cfg.VivoChannelID == "" && cfg.HonorChannelID == "" && cfg.MeizuChannelID == "" {
-		return PushConfig{}, fmt.Errorf("at least one Push registration channel ID is required")
-	}
 	cfg.CredentialEncryptionKey, err = loadOrCreatePushCredentialKey(defaultPushCredentialKeyFile)
 	if err != nil {
 		return PushConfig{}, fmt.Errorf("load push credential key: %w", err)

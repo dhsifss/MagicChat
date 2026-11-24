@@ -308,7 +308,6 @@ func TestPushConfigRejectsIncompleteOrUnsafeServiceSettings(t *testing.T) {
 		{"PUSH_SERVICE_URL", "https://push.example.com/api"},
 		{"PUSH_SERVICE_URL", "https://push.example.com?token=secret"},
 		{"PUSH_APNS_PRODUCTION_CHANNEL_ID", "invalid"},
-		{"PUSH_APNS_PRODUCTION_CHANNEL_ID", ""},
 	} {
 		t.Run(test.name+test.value, func(t *testing.T) {
 			setRequiredEnvironment(t)
@@ -320,5 +319,16 @@ func TestPushConfigRejectsIncompleteOrUnsafeServiceSettings(t *testing.T) {
 				t.Fatal("accepted invalid push configuration")
 			}
 		})
+	}
+}
+
+func TestLoadPushSupportsAutomaticClientMatchingWithoutFixedChannels(t *testing.T) {
+	setRequiredEnvironment(t)
+	t.Chdir(t.TempDir())
+	t.Setenv("PUSH_SERVICE_URL", "https://push.example.com")
+	t.Setenv("PUSH_SERVICE_CREDENTIAL", "mpt_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")
+	cfg, err := loadPushConfig()
+	if err != nil || !cfg.Enabled || cfg.FCMChannelID != "" {
+		t.Fatalf("automatic client matching configuration rejected: %+v %v", cfg.Enabled, err)
 	}
 }

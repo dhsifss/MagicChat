@@ -24,24 +24,27 @@ import (
 // two active-endpoint uniqueness constraints. Requests use its POST/PUT/CAS and
 // complete-device-snapshot semantics, so a duplicate POST cannot mimic renewal.
 type postgresPushContract struct {
-	db                  *gorm.DB
-	failUpdateResponse  atomic.Bool
-	failCreateResponse  atomic.Bool
-	failCreateRequest   atomic.Bool
-	failRevoke          atomic.Bool
-	failMessageResponse atomic.Bool
-	failDeviceReport    atomic.Bool
-	routingUnavailable  atomic.Bool
-	posts               atomic.Int32
-	puts                atomic.Int32
-	beforeCreate        func()
-	afterCreate         func()
-	beforeRevoke        func()
-	beforeMessage       func()
-	beforeDeviceReport  func()
-	unreadyChannel      atomic.Value
-	rejectedToken       atomic.Value
-	channelProviders    sync.Map
+	db                    *gorm.DB
+	failUpdateResponse    atomic.Bool
+	failCreateResponse    atomic.Bool
+	failRejectionResponse atomic.Bool
+	failCreateRequest     atomic.Bool
+	failRevoke            atomic.Bool
+	failMessageResponse   atomic.Bool
+	failDeviceReport      atomic.Bool
+	routingUnavailable    atomic.Bool
+	posts                 atomic.Int32
+	puts                  atomic.Int32
+	beforeCreate          func()
+	afterCreate           func()
+	beforeRevoke          func()
+	beforeMessage         func()
+	beforeDeviceReport    func()
+	unreadyChannel        atomic.Value
+	rejectedToken         atomic.Value
+	channelProviders      sync.Map
+	clientChannels        sync.Map
+	renewalErrors         sync.Map
 }
 type contractEndpoint struct {
 	ID             string `gorm:"primaryKey"`
@@ -68,6 +71,7 @@ type contractRegistration struct {
 	Key        string `gorm:"primaryKey"`
 	Request    string
 	EndpointID string
+	ErrorCode  string
 }
 
 func (contractRegistration) TableName() string { return "review_upstream_registrations" }
@@ -92,7 +96,7 @@ func newPostgresPushContract(t *testing.T, db *gorm.DB) (*postgresPushContract, 
  CREATE TABLE review_upstream_endpoints(id TEXT PRIMARY KEY, installation_id TEXT NOT NULL, provider TEXT NOT NULL, config_id TEXT NOT NULL, token TEXT NOT NULL, version BIGINT NOT NULL, expires_at TIMESTAMPTZ NOT NULL, status TEXT NOT NULL);
  CREATE UNIQUE INDEX review_active_token ON review_upstream_endpoints(config_id,provider,token) WHERE status='active';
  CREATE UNIQUE INDEX review_active_provider ON review_upstream_endpoints(installation_id,provider) WHERE status='active';
- CREATE TABLE review_upstream_registrations(key TEXT PRIMARY KEY, request TEXT NOT NULL, endpoint_id TEXT NOT NULL);
+ CREATE TABLE review_upstream_registrations(key TEXT PRIMARY KEY, request TEXT NOT NULL, endpoint_id TEXT NOT NULL, error_code TEXT NOT NULL DEFAULT '');
  CREATE TABLE review_upstream_submissions(key TEXT PRIMARY KEY, request TEXT NOT NULL);
  CREATE TABLE review_upstream_handoffs(token TEXT PRIMARY KEY,installation_id TEXT NOT NULL);`).Error; err != nil {
 		t.Fatal(err)
@@ -238,6 +242,7 @@ func (f *postgresPushContract) serve(w http.ResponseWriter, r *http.Request) {
 		}
 		raw, _ := json.Marshal(input)
 		endpointID := ""
+		rejection := ""
 		err := f.db.Transaction(func(tx *gorm.DB) error {
 			if err := tx.Exec("SELECT pg_advisory_xact_lock(hashtextextended(?,0))", input.IdempotencyKey).Error; err != nil {
 				return err
@@ -248,11 +253,21 @@ func (f *postgresPushContract) serve(w http.ResponseWriter, r *http.Request) {
 					return errors.New("idempotency_conflict")
 				}
 				endpointID = original.EndpointID
+				rejection = original.ErrorCode
 				return nil
 			} else if !errors.Is(err, gorm.ErrRecordNotFound) {
 				return err
 			}
-			if unready, _ := f.unreadyChannel.Load().(string); unready != "" && input.ChannelID == unready {
+			channelID := input.ChannelID
+			if input.ClientID != "" {
+				matched, ok := f.clientChannels.Load(input.ClientID + ":" + input.Provider + ":" + input.Environment)
+				if !ok {
+					rejection = "client_channel_not_found"
+					return tx.Create(&contractRegistration{Key: input.IdempotencyKey, Request: string(raw), ErrorCode: rejection}).Error
+				}
+				channelID = matched.(string)
+			}
+			if unready, _ := f.unreadyChannel.Load().(string); unready != "" && channelID == unready {
 				return errors.New("channel_not_ready")
 			}
 			var device contractDevice
@@ -277,10 +292,10 @@ func (f *postgresPushContract) serve(w http.ResponseWriter, r *http.Request) {
 				return errors.New("endpoint_expired")
 			}
 			provider := "fcm"
-			if configured, ok := f.channelProviders.Load(input.ChannelID); ok {
+			if configured, ok := f.channelProviders.Load(channelID); ok {
 				provider = configured.(string)
 			}
-			endpoint := contractEndpoint{ID: strings.ReplaceAll(uuid.NewString(), "-", ""), InstallationID: device.ID, Provider: provider, ConfigID: input.ChannelID, Token: input.Token, Version: 1, ExpiresAt: expiry, Status: "active"}
+			endpoint := contractEndpoint{ID: strings.ReplaceAll(uuid.NewString(), "-", ""), InstallationID: device.ID, Provider: provider, ConfigID: channelID, Token: input.Token, Version: 1, ExpiresAt: expiry, Status: "active"}
 			if err := tx.Create(&endpoint).Error; err != nil {
 				return err
 			}
@@ -289,10 +304,18 @@ func (f *postgresPushContract) serve(w http.ResponseWriter, r *http.Request) {
 		})
 		if err != nil {
 			code := "endpoint_conflict"
-			if err.Error() == "binding_retired" || err.Error() == "idempotency_conflict" || err.Error() == "endpoint_expired" || err.Error() == "channel_not_ready" {
+			if err.Error() == "binding_retired" || err.Error() == "idempotency_conflict" || err.Error() == "endpoint_expired" || err.Error() == "channel_not_ready" || err.Error() == "client_channel_not_found" {
 				code = err.Error()
 			}
 			reject(409, code)
+			return
+		}
+		if rejection != "" {
+			if f.failRejectionResponse.Swap(false) {
+				reject(503, "response_lost")
+				return
+			}
+			reject(409, rejection)
 			return
 		}
 		if f.failCreateResponse.Swap(false) {
@@ -325,6 +348,10 @@ func (f *postgresPushContract) serve(w http.ResponseWriter, r *http.Request) {
 		}
 		if r.Method == http.MethodPut {
 			f.puts.Add(1)
+			if code, ok := f.renewalErrors.Load(endpoint.ID); ok {
+				reject(409, code.(string))
+				return
+			}
 			var input struct {
 				Version   int64     `json:"expected_version"`
 				Token     string    `json:"token"`

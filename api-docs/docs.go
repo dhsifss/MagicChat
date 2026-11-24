@@ -12942,6 +12942,9 @@ const docTemplate = `{
         "client.registerPushGrantRequest": {
             "type": "object",
             "properties": {
+                "client_id": {
+                    "type": "string"
+                },
                 "expires_at": {
                     "type": "string"
                 },

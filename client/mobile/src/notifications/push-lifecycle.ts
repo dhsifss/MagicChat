@@ -158,9 +158,11 @@ async function synchronizeRemotePush(
     throw new PushLifecycleError("android_provider_unavailable", "当前设备无可用的安卓推送通道")
   }
   const appVersion = Application.nativeApplicationVersion ?? "unknown"
+  const clientId = Application.applicationId ?? undefined
 
   let installation = await loadPushInstallation()
-  const deviceChanged = !installation || installation.platform !== device.platform
+  const clientChanged = installation?.clientId !== undefined && installation.clientId !== clientId
+  const deviceChanged = !installation || installation.platform !== device.platform || clientChanged
   // Bundled SDKs are optional on a particular device. Recover providers that
   // previously registered, excluding explicit SDK support-check rejections.
   const cachedRegistrations = deviceChanged ? [] : installation?.registrations ?? []
@@ -180,7 +182,7 @@ async function synchronizeRemotePush(
   if (!effectiveRegistrations) throw new PushLifecycleError("push_registration_invalid", "设备注册信息无效")
   const registrationsChanged = JSON.stringify(installation?.registrations) !== JSON.stringify(effectiveRegistrations)
   const tokensUnavailable = device.registrations.length === 0 || missingProviders.size > 0
-  const metadataChanged = installation?.manufacturer !== device.manufacturer || installation?.model !== device.model
+  const metadataChanged = installation?.manufacturer !== device.manufacturer || installation?.model !== device.model || installation?.clientId !== clientId
   if (delegation && (deviceChanged || delegation.accountId !== identity.accountId || !targetsMatch(delegation.target, target) ||
       delegation.status === "pending_revocation" || delegation.privateRegistrationVersion !== PRIVATE_PUSH_REGISTRATION_VERSION)) {
     const switchingAccount = delegation.accountId !== identity.accountId || !targetsMatch(delegation.target, target)
@@ -189,6 +191,7 @@ async function synchronizeRemotePush(
     installation = await loadPushInstallation()
   }
   installation = {
+    ...(clientId ? { clientId } : {}),
     appVersion, manufacturer: device.manufacturer, model: device.model,
     installationId: installation?.installationId ?? Crypto.randomUUID(),
     platform: device.platform,

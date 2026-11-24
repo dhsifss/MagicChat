@@ -44,7 +44,7 @@ Object.assign(globalThis, { __pushLifecycleFixture: fixture })
 // Exercise the real lifecycle and coordinators with only native I/O and storage
 // replaced. The hooks are local to this test process.
 const stubs: Record<string, string> = {
-  "expo-application": `export const nativeApplicationVersion = "1"; export const getIosPushNotificationServiceEnvironmentAsync = async () => "production"`,
+  "expo-application": `export const applicationId = "cloud.baizhi.chat"; export const nativeApplicationVersion = "1"; export const getIosPushNotificationServiceEnvironmentAsync = async () => "production"`,
   "expo-device": `export const manufacturer = "Google"; export const modelName = "Pixel"`,
   "expo-notifications": `export const getDevicePushTokenAsync = async () => { if(f.fcmFails) throw new Error("FCM temporarily unavailable"); if(f.fcmTimeout) return new Promise(() => {}); return {type: "android", data: f.fcmToken} }`,
   "expo-crypto": `export const randomUUID = () => "replacement-" + (++f.nextID)`,
@@ -89,6 +89,7 @@ const { synchronizePushDelegation, queuePushDelegationRevocation, flushPendingPu
 
 function reset() {
   fixture.installation = {
+    clientId: "cloud.baizhi.chat",
     appVersion: "1", manufacturer: "Google", model: "Pixel", installationId: "installation-1",
     platform: "android", registrations: [{ provider: "fcm", token: "fcm-token" }],
   }
@@ -115,6 +116,28 @@ function reset() {
   fixture.nextID = 0
   setCurrentPushIdentity(IDENTITY)
 }
+
+test("an existing installation reports its native client ID without replacing its grant", async () => {
+  reset()
+  delete fixture.installation!.clientId
+  fixture.delegation!.expiresAt = new Date(Date.now() + 20 * DAY).toISOString()
+  assert.equal(await synchronizePushDelegation(IDENTITY), true)
+  assert.equal(fixture.registrations.length, 1)
+  assert.equal(fixture.registrations[0].installation.clientId, "cloud.baizhi.chat")
+  assert.equal(fixture.delegation!.grantId, "grant-1")
+  assert.deepEqual(fixture.revocations, [])
+})
+
+test("a changed native application identity replaces the binding and excludes cached tokens", async () => {
+  reset()
+  fixture.installation!.clientId = "cloud.example.previous"
+  fixture.installation!.registrations.push({ provider: "xiaomi_push", token: "previous-client-token" })
+  fixture.configured = ["fcm", "xiaomi_push"]
+  assert.equal(await synchronizePushDelegation(IDENTITY), true)
+  assert.deepEqual(fixture.revocations, ["grant-1"])
+  assert.equal(fixture.registrations[0].installation.clientId, "cloud.baizhi.chat")
+  assert.deepEqual(fixture.registrations[0].installation.registrations, [{ provider: "fcm", token: "fcm-token" }])
+})
 
 test("routine renewal preserves the grant used by notifications already in the tray", async () => {
   reset()

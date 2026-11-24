@@ -2,7 +2,7 @@
 
 客户端通过本地 Expo Module `modules/vendor-push` 直接使用六家厂商 SDK，取得各自原生 Token。SDK 只在配置完整的构建中参与编译；系统通知授权并进入当前账号推送同步后调用注册。品牌和平台作为设备元数据上报，实际取得的 Token 集合用于声明已注册服务；不根据品牌伪造 Token。
 
-| 厂商 | 固定 SDK | 移动端构建配置 | Server 登记通道 |
+| 厂商 | 固定 SDK | 移动端构建配置 | 未上报应用标识时的 Server 固定通道 |
 | --- | --- | --- | --- |
 | 华为 HMS | com.huawei.hms:push:6.13.0.301 | PUSH_HUAWEI_APP_ID、PUSH_HUAWEI_AGCONNECT_SERVICES | PUSH_HUAWEI_CHANNEL_ID |
 | 小米 | com.umeng.umsdk:xiaomi-push:7.12.4 | PUSH_XIAOMI_APP_ID、PUSH_XIAOMI_APP_KEY | PUSH_XIAOMI_CHANNEL_ID |
@@ -11,6 +11,8 @@
 | 荣耀 | com.hihonor.mcs:push:8.0.12.307 | PUSH_HONOR_APP_ID | PUSH_HONOR_CHANNEL_ID |
 | 魅族 | com.meizu.flyme.internet:push-internal:5.0.3 | PUSH_MEIZU_APP_ID、PUSH_MEIZU_APP_KEY | PUSH_MEIZU_CHANNEL_ID |
 | FCM | expo-notifications 的 Firebase SDK | GOOGLE_SERVICES_JSON | PUSH_FCM_CHANNEL_ID |
+
+移动端登记时会自动上报当前包名，推送平台根据已发布厂商配置中的包名匹配通道。多客户端的配置及升级顺序见[推送运维说明](mobile-push-operations.md)。
 
 华为/荣耀使用厂商 Maven 仓库；小米/OPPO/vivo 使用 Maven Central 的原厂二进制重打包，依赖中只引入对应厂商 SDK。小米和 vivo AAR 内附原厂 JAR，编译调用已核对其真实 API。SDK 声明在 `android/build.gradle` 固定版本，不动态加载远端代码。
 

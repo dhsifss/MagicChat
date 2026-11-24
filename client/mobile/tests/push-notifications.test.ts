@@ -202,7 +202,7 @@ test("registers grants and resolves routes only through the mapped private serve
       status: "pending_registration",
       target,
     },
-    { appVersion: "1", installationId: "installation-1", platform: "ios", manufacturer:"Apple", model:"iPhone", registrations:[{provider:"apns",token:"native-token",environment:"production"}], handoffTokens:["mph_"+"a".repeat(43)] },
+    { clientId: "cloud.baizhi.chat", appVersion: "1", installationId: "installation-1", platform: "ios", manufacturer:"Apple", model:"iPhone", registrations:[{provider:"apns",token:"native-token",environment:"production"}], handoffTokens:["mph_"+"a".repeat(43)] },
     { fetcher }
   )
   const route = await resolvePrivatePushRoute(target, "r".repeat(43), {
@@ -215,6 +215,7 @@ test("registers grants and resolves routes only through the mapped private serve
   )
   assert.equal(requests[0]?.init?.credentials, "omit")
   const registration = JSON.parse(String(requests[0]?.init?.body))
+  assert.equal(registration.client_id, "cloud.baizhi.chat")
   assert.deepEqual(registration.handoff_tokens, ["mph_"+"a".repeat(43)])
   assert.equal(registered.handoffToken, "mph_"+"b".repeat(43))
   assert.deepEqual(registration.registrations, [{provider:"apns",token:"native-token",environment:"production"}])

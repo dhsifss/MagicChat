@@ -21,7 +21,8 @@ import (
 	"github.com/google/uuid"
 )
 
-// PushServiceOptions maps native device providers to server-controlled channels.
+// PushServiceOptions supplies backend authentication and fixed channels for
+// registrations without a client ID. Application matching belongs to Push.
 type PushServiceOptions struct {
 	URL, Credential                                                                                string
 	APNSDevelopmentChannelID, APNSProductionChannelID, FCMChannelID                                string
@@ -46,6 +47,7 @@ var pushErrorCodePattern = regexp.MustCompile(`^[a-z][a-z0-9_]{0,119}$`)
 
 var endpointIDPattern = regexp.MustCompile(`^[0-9a-f]{32}$`)
 var registrationRefPattern = regexp.MustCompile(`^[A-Za-z0-9_-]{16,128}$`)
+var pushClientIDPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,254}$`)
 
 var errBindingRetirementNeedsPause = errors.New("binding retirement requires a committed registration pause")
 
@@ -58,6 +60,8 @@ func pushReference(value string) string {
 // pushBinding is stored encrypted in the existing local binding record.
 // InstallationID is the Push device ID used for server-side provider routing.
 type pushBinding struct {
+	ClientID            string                  `json:"client_id,omitempty"`
+	APNSEnvironment     string                  `json:"apns_environment,omitempty"`
 	InstallationID      string                  `json:"installation_id"`
 	EndpointIDs         []string                `json:"endpoint_ids"`
 	RegistrationRef     string                  `json:"registration_ref,omitempty"`
@@ -65,6 +69,7 @@ type pushBinding struct {
 	BindingRef          string                  `json:"binding_ref,omitempty"`
 	PendingCreates      []pendingEndpointCreate `json:"pending_creates,omitempty"`
 	RegistrationPending bool                    `json:"registration_pending,omitempty"`
+	RetirementPending   bool                    `json:"retirement_pending,omitempty"`
 	HandoffToken        string                  `json:"handoff_token,omitempty"`
 }
 
@@ -74,7 +79,10 @@ type endpointCreateRequest struct {
 	IdempotencyKey  string `json:"idempotency_key"`
 	InstallationRef string `json:"installation_ref"`
 	BindingRef      string `json:"binding_ref"`
-	ChannelID       string `json:"channel_config_id"`
+	ChannelID       string `json:"channel_config_id,omitempty"`
+	ClientID        string `json:"client_id,omitempty"`
+	Provider        string `json:"provider,omitempty"`
+	Environment     string `json:"environment,omitempty"`
 	Platform        string `json:"platform"`
 	Token           string `json:"token"`
 	ExpiresAt       string `json:"expires_at"`
@@ -131,7 +139,7 @@ func validDeviceRegistrations(cmd RegisterGrantCommand) bool {
 	validText := func(s string) bool {
 		return utf8.ValidString(s) && len(s) <= 128 && strings.TrimSpace(s) == s && !strings.ContainsFunc(s, func(r rune) bool { return unicode.IsControl(r) || unicode.Is(unicode.Cf, r) })
 	}
-	if !validText(cmd.Manufacturer) || !validText(cmd.Model) || len(cmd.Registrations) > 8 {
+	if (cmd.ClientID != "" && !pushClientIDPattern.MatchString(cmd.ClientID)) || !validText(cmd.Manufacturer) || !validText(cmd.Model) || len(cmd.Registrations) > 8 {
 		return false
 	}
 	seen := map[string]bool{}
@@ -157,7 +165,10 @@ func validDeviceRegistrations(cmd RegisterGrantCommand) bool {
 	return true
 }
 
-func (c *HTTPPushServiceClient) registrationChannel(r ProviderRegistration) string {
+func (c *HTTPPushServiceClient) registrationChannel(clientID string, r ProviderRegistration) string {
+	if clientID != "" {
+		return "" // Application matching is performed by the Push service.
+	}
 	switch r.Provider {
 	case "apns":
 		if r.Environment == "development" {
@@ -182,6 +193,22 @@ func (c *HTTPPushServiceClient) registrationChannel(r ProviderRegistration) stri
 	return ""
 }
 
+func (c *HTTPPushServiceClient) registrationMatches(clientID string, r ProviderRegistration, request endpointCreateRequest) bool {
+	if clientID != "" {
+		return request.ChannelID == "" && request.ClientID == clientID && request.Provider == r.Provider && request.Environment == r.Environment
+	}
+	return request.ClientID == "" && request.ChannelID == c.registrationChannel(clientID, r)
+}
+
+func apnsRegistrationEnvironment(registrations []ProviderRegistration) string {
+	for _, registration := range registrations {
+		if registration.Provider == "apns" {
+			return registration.Environment
+		}
+	}
+	return ""
+}
+
 func (c *HTTPPushServiceClient) PrepareRegistration(ctx context.Context, cmd RegisterGrantCommand) (string, error) {
 	if len(cmd.Registrations) == 0 {
 		return "", &GatewayError{Kind: GatewayErrorRetry, Code: "push_device_token_unavailable"}
@@ -195,7 +222,7 @@ func (c *HTTPPushServiceClient) PrepareRegistration(ctx context.Context, cmd Reg
 	configured := false
 	for _, r := range registrations {
 		providers = append(providers, r.Provider)
-		configured = configured || c.registrationChannel(r) != ""
+		configured = configured || cmd.ClientID != "" || c.registrationChannel(cmd.ClientID, r) != ""
 	}
 	if !configured {
 		// Reject before publishing a routing snapshot that this server cannot
@@ -211,13 +238,14 @@ func (c *HTTPPushServiceClient) PrepareRegistration(ctx context.Context, cmd Reg
 		if err != nil {
 			return "", err
 		}
-		rotate := retired
+		rotate := previous.RetirementPending || retired || previous.ClientID != cmd.ClientID ||
+			(cmd.ClientID != "" && previous.APNSEnvironment != apnsRegistrationEnvironment(registrations))
 		for _, pending := range previous.PendingCreates {
 			if expiry, err := time.Parse(time.RFC3339Nano, pending.Request.ExpiresAt); err == nil && !expiry.After(time.Now()) {
 				rotate = true
 			}
 			for _, registration := range registrations {
-				if registration.Provider == pending.Provider && c.registrationChannel(registration) != pending.Request.ChannelID {
+				if registration.Provider == pending.Provider && !c.registrationMatches(cmd.ClientID, registration, pending.Request) {
 					rotate = true
 				}
 			}
@@ -232,8 +260,8 @@ func (c *HTTPPushServiceClient) PrepareRegistration(ctx context.Context, cmd Reg
 			// Channel IDs belong to an endpoint for its entire lifetime. Stage a
 			// fresh binding before writing endpoints when server configuration changes.
 			for _, registration := range registrations {
-				channel := c.registrationChannel(registration)
-				if endpoint.Provider == registration.Provider && channel != "" && endpoint.ConfigID != channel {
+				channel := c.registrationChannel(cmd.ClientID, registration)
+				if cmd.ClientID == "" && endpoint.Provider == registration.Provider && channel != "" && endpoint.ConfigID != channel {
 					rotate = true
 				}
 			}
@@ -284,7 +312,7 @@ func (c *HTTPPushServiceClient) PrepareRegistration(ctx context.Context, cmd Reg
 	if !validEndpointID(device.ID) {
 		return "", &GatewayError{Kind: GatewayErrorRetry, Code: "push_response_invalid"}
 	}
-	binding := pushBinding{InstallationID: device.ID, RegistrationRef: ref, Discover: true, BindingRef: pushReference("binding\x00" + ref), EndpointIDs: []string{}, RegistrationPending: true}
+	binding := pushBinding{ClientID: cmd.ClientID, APNSEnvironment: apnsRegistrationEnvironment(registrations), InstallationID: device.ID, RegistrationRef: ref, Discover: true, BindingRef: pushReference("binding\x00" + ref), EndpointIDs: []string{}, RegistrationPending: true}
 	if hasPrevious {
 		binding.BindingRef = previous.BindingRef
 		if binding.BindingRef == "" {
@@ -303,22 +331,27 @@ func (c *HTTPPushServiceClient) PrepareRegistration(ctx context.Context, cmd Reg
 		}
 	}
 	for _, registration := range registrations {
-		channel := c.registrationChannel(registration)
-		usable := channel != "" && slices.ContainsFunc(existing, func(e upstreamEndpoint) bool {
-			return e.Status == "active" && e.Provider == registration.Provider && e.ConfigID == channel && (e.ExpiresAt == nil || e.ExpiresAt.After(time.Now()))
+		channel := c.registrationChannel(cmd.ClientID, registration)
+		usable := (cmd.ClientID != "" || channel != "") && slices.ContainsFunc(existing, func(e upstreamEndpoint) bool {
+			return e.Status == "active" && e.Provider == registration.Provider && (cmd.ClientID != "" || e.ConfigID == channel) && (e.ExpiresAt == nil || e.ExpiresAt.After(time.Now()))
 		})
 		if usable {
 			binding.RegistrationPending = false
 		}
-		if channel == "" || usable || slices.ContainsFunc(binding.PendingCreates, func(p pendingEndpointCreate) bool { return p.Provider == registration.Provider }) {
+		if (cmd.ClientID == "" && channel == "") || usable || slices.ContainsFunc(binding.PendingCreates, func(p pendingEndpointCreate) bool { return p.Provider == registration.Provider }) {
 			continue
 		}
-		binding.PendingCreates = append(binding.PendingCreates, pendingEndpointCreate{Provider: registration.Provider, FirstAttempt: true, Request: endpointCreateRequest{
+		request := endpointCreateRequest{
 			IdempotencyKey:  pushReference("endpoint\x00" + uuid.NewString()),
 			InstallationRef: ref, BindingRef: binding.BindingRef, ChannelID: channel,
+			ClientID: cmd.ClientID,
 			Platform: cmd.Platform, Token: registration.Token,
 			ExpiresAt: cmd.ExpiresAt.UTC().Truncate(time.Microsecond).Format(time.RFC3339Nano),
-		}})
+		}
+		if cmd.ClientID != "" {
+			request.Provider, request.Environment = registration.Provider, registration.Environment
+		}
+		binding.PendingCreates = append(binding.PendingCreates, pendingEndpointCreate{Provider: registration.Provider, FirstAttempt: true, Request: request})
 	}
 	raw, _ := json.Marshal(binding)
 	return string(raw), nil
@@ -332,8 +365,17 @@ func (c *HTTPPushServiceClient) RegisterEndpoint(ctx context.Context, cmd Regist
 		return "", &GatewayError{Kind: GatewayErrorInvalid, Code: "invalid_device_report"}
 	}
 	prepared, ok := decodePushBinding(cmd.SendToken)
-	if !ok {
+	if !ok || prepared.ClientID != cmd.ClientID || (cmd.ClientID != "" && prepared.APNSEnvironment != apnsRegistrationEnvironment(cmd.Registrations)) {
 		return "", &GatewayError{Kind: GatewayErrorInvalid, Code: "push_registration_not_prepared"}
+	}
+	fail := func(err error) (string, error) {
+		for _, pending := range prepared.PendingCreates {
+			if pending.Rejected {
+				raw, _ := json.Marshal(prepared)
+				return string(raw), err
+			}
+		}
+		return "", err
 	}
 	registrations := slices.Clone(cmd.Registrations)
 	slices.SortFunc(registrations, func(a, b ProviderRegistration) int { return strings.Compare(a.Provider, b.Provider) })
@@ -345,10 +387,10 @@ func (c *HTTPPushServiceClient) RegisterEndpoint(ctx context.Context, cmd Regist
 	if ref == "" {
 		ref = pushReference("installation\x00" + cmd.GatewayGrantID)
 	}
-	binding := pushBinding{InstallationID: prepared.InstallationID, RegistrationRef: ref, BindingRef: prepared.BindingRef, Discover: true, EndpointIDs: []string{}}
+	binding := pushBinding{ClientID: cmd.ClientID, APNSEnvironment: prepared.APNSEnvironment, InstallationID: prepared.InstallationID, RegistrationRef: ref, BindingRef: prepared.BindingRef, Discover: true, EndpointIDs: []string{}}
 	for _, r := range registrations {
-		channel := c.registrationChannel(r)
-		if channel == "" {
+		channel := c.registrationChannel(cmd.ClientID, r)
+		if cmd.ClientID == "" && channel == "" {
 			continue
 		}
 		endpointID := ""
@@ -356,14 +398,22 @@ func (c *HTTPPushServiceClient) RegisterEndpoint(ctx context.Context, cmd Regist
 			if endpoint.Status != "active" || endpoint.Provider != r.Provider {
 				continue
 			}
-			if endpoint.ConfigID != channel {
+			if cmd.ClientID == "" && endpoint.ConfigID != channel {
 				return "", &GatewayError{Kind: GatewayErrorInvalid, Code: "push_channel_changed"}
 			}
 			if err := c.request(ctx, http.MethodPut, "/v1/endpoints/"+endpoint.ID, map[string]any{
 				"expected_version": endpoint.Version, "token": r.Token,
 				"expires_at": cmd.ExpiresAt.UTC().Truncate(time.Microsecond).Format(time.RFC3339Nano),
 			}, http.StatusOK, nil); err != nil {
-				return "", err
+				var upstream *GatewayError
+				if errors.As(err, &upstream) && upstream.StatusCode == http.StatusConflict && upstream.Code == "configuration_identity_changed" {
+					// Commit the old binding and pause before attempting retirement.
+					// Preparation must replace it even when its channel ID is unchanged.
+					prepared.RegistrationPending, prepared.RetirementPending = true, true
+					raw, _ := json.Marshal(prepared)
+					return string(raw), err
+				}
+				return fail(err)
 			}
 			endpointID = endpoint.ID
 			break
@@ -372,27 +422,40 @@ func (c *HTTPPushServiceClient) RegisterEndpoint(ctx context.Context, cmd Regist
 			binding.EndpointIDs = append(binding.EndpointIDs, endpointID)
 			continue
 		}
-		index := slices.IndexFunc(prepared.PendingCreates, func(p pendingEndpointCreate) bool { return p.Provider == r.Provider && p.Request.ChannelID == channel })
+		index := slices.IndexFunc(prepared.PendingCreates, func(p pendingEndpointCreate) bool {
+			return p.Provider == r.Provider && c.registrationMatches(cmd.ClientID, r, p.Request)
+		})
 		if index < 0 {
 			return "", &GatewayError{Kind: GatewayErrorRetry, Code: "push_registration_not_prepared"}
 		}
 		request := prepared.PendingCreates[index].Request
 		id, err := c.createEndpoint(ctx, request)
 		if err != nil {
+			var upstream *GatewayError
+			if cmd.ClientID != "" && errors.As(err, &upstream) && upstream.StatusCode == http.StatusConflict && upstream.Code == "client_channel_not_found" {
+				// Push durably rejects this registration key before replying, so
+				// even a late original request cannot create a missing provider.
+				prepared.PendingCreates[index].Rejected = true
+				continue
+			}
 			if prepared.PendingCreates[index].FirstAttempt && definitivelyRejectedCreation(err) {
 				prepared.PendingCreates[index].Rejected = true
 				raw, _ := json.Marshal(prepared)
 				// The caller commits this settlement even though registration fails.
 				return string(raw), err
 			}
-			return "", err
+			return fail(err)
 		}
 		if request.Token != r.Token || request.ExpiresAt != cmd.ExpiresAt.UTC().Truncate(time.Microsecond).Format(time.RFC3339Nano) {
 			// A retry may carry refreshed tokens/lease. First settle the original
 			// request; the next pass finds its endpoint and updates it with CAS.
-			return "", &GatewayError{Kind: GatewayErrorRetry, Code: "push_registration_changed"}
+			return fail(&GatewayError{Kind: GatewayErrorRetry, Code: "push_registration_changed"})
 		}
 		binding.EndpointIDs = append(binding.EndpointIDs, id)
+	}
+	if len(binding.EndpointIDs) == 0 {
+		raw, _ := json.Marshal(prepared)
+		return string(raw), &GatewayError{Kind: GatewayErrorInvalid, Code: "push_channel_unavailable"}
 	}
 	// Provider removal can overtake a timed-out creation too. Settle and revoke
 	// every omitted request before discarding the persisted registration plan.
@@ -401,13 +464,13 @@ func (c *HTTPPushServiceClient) RegisterEndpoint(ctx context.Context, cmd Regist
 			continue
 		}
 		if slices.ContainsFunc(registrations, func(r ProviderRegistration) bool {
-			return r.Provider == pending.Provider && c.registrationChannel(r) == pending.Request.ChannelID
+			return r.Provider == pending.Provider && c.registrationMatches(cmd.ClientID, r, pending.Request)
 		}) {
 			continue
 		}
 		// Revoke only the omitted creation; other providers remain in this binding.
 		if err := c.revokePendingCreation(ctx, pending.Request); err != nil {
-			return "", err
+			return fail(err)
 		}
 	}
 	slices.Sort(binding.EndpointIDs)
@@ -415,10 +478,10 @@ func (c *HTTPPushServiceClient) RegisterEndpoint(ctx context.Context, cmd Regist
 		Token string `json:"handoff_token"`
 	}
 	if err := c.request(ctx, http.MethodPost, "/v1/devices/"+binding.InstallationID+"/handoff", struct{}{}, http.StatusOK, &handoff); err != nil {
-		return "", err
+		return fail(err)
 	}
 	if !validHandoffToken(handoff.Token) {
-		return "", &GatewayError{Kind: GatewayErrorRetry, Code: "push_response_invalid"}
+		return fail(&GatewayError{Kind: GatewayErrorRetry, Code: "push_response_invalid"})
 	}
 	binding.HandoffToken = handoff.Token
 	raw, _ := json.Marshal(binding)
@@ -453,7 +516,7 @@ func definitivelyRejectedCreation(err error) bool {
 	// Only explicit admission rejections prove that this first POST created no
 	// endpoint. Transport errors, 5xx responses and conflicts remain unresolved.
 	return (upstream.StatusCode == http.StatusBadRequest && upstream.Code == "invalid_endpoint_token") ||
-		(upstream.StatusCode == http.StatusConflict && upstream.Code == "channel_not_ready") ||
+		(upstream.StatusCode == http.StatusConflict && (upstream.Code == "channel_not_ready" || upstream.Code == "client_channel_ambiguous")) ||
 		(upstream.StatusCode == http.StatusUnprocessableEntity && (upstream.Code == "unsupported_capability" || upstream.Code == "unsupported_platform"))
 }
 
@@ -475,7 +538,9 @@ func (c *HTTPPushServiceClient) revokePendingCreation(ctx context.Context, reque
 	var upstream *GatewayError
 	// These rejections are checked after the registration key lock upstream.
 	// A closed binding or expired request cannot produce a later new endpoint.
-	if errors.As(err, &upstream) && (upstream.Code == "binding_retired" || upstream.Code == "endpoint_expired") {
+	// A persisted missing-channel result likewise fences every copy of its key.
+	if errors.As(err, &upstream) && (upstream.Code == "binding_retired" || upstream.Code == "endpoint_expired" ||
+		(request.ClientID != "" && upstream.StatusCode == http.StatusConflict && upstream.Code == "client_channel_not_found")) {
 		return nil
 	}
 	if err != nil {

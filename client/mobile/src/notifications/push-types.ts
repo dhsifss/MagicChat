@@ -17,6 +17,7 @@ export type PushProviderRegistration = {
 }
 
 export type PushInstallation = {
+	clientId?: string
 	// Kept in SecureStore with the installation, never in the public retry queue.
 	handoffTokens?: string[]
   appVersion: string
@@ -180,11 +181,12 @@ export function parseProviderRegistrations(value: unknown, platform: PushPlatfor
 
 export function parsePushInstallation(value: unknown): PushInstallation | null {
   if (!isRecord(value) || (value.platform !== "ios" && value.platform !== "android")) return null
+  if (value.clientId !== undefined && (typeof value.clientId !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,254}$/.test(value.clientId))) return null
   const registrations = parseProviderRegistrations(value.registrations, value.platform)
   if (!registrations || typeof value.appVersion !== "string" || typeof value.installationId !== "string" || !value.installationId || typeof value.manufacturer !== "string" || typeof value.model !== "string") return null
   const tokens = value.handoffTokens
   if (tokens !== undefined && (!Array.isArray(tokens) || tokens.length > 10 || !tokens.every((token) => typeof token === "string" && /^mph_[A-Za-z0-9_-]{17,4092}$/.test(token)))) return null
-  return { appVersion: value.appVersion, installationId: value.installationId, platform: value.platform, manufacturer: value.manufacturer, model: value.model, registrations,
+  return { ...(value.clientId !== undefined ? { clientId: value.clientId as string } : {}), appVersion: value.appVersion, installationId: value.installationId, platform: value.platform, manufacturer: value.manufacturer, model: value.model, registrations,
     ...(tokens !== undefined ? { handoffTokens: tokens as string[] } : {}) }
 }
 

@@ -14,6 +14,7 @@ type PushAPI struct {
 }
 
 type registerPushGrantRequest struct {
+	ClientID       string                            `json:"client_id"`
 	HandoffTokens  []string                          `json:"handoff_tokens"`
 	InstallationID string                            `json:"installation_id"`
 	GrantID        string                            `json:"grant_id"`
@@ -221,7 +222,8 @@ func (a *PushAPI) registerGrant(c echo.Context) error {
 		registrations = append(registrations, mobilepush.ProviderRegistration{Provider: registration.Provider, Token: registration.Token, Environment: registration.Environment})
 	}
 	grant, err := a.push.RegisterGrant(c.Request().Context(), mobilepush.RegisterGrantCommand{
-		UserID: current.ID, SessionID: currentSession.ID, InstallationID: request.InstallationID,
+		ClientID: request.ClientID,
+		UserID:   current.ID, SessionID: currentSession.ID, InstallationID: request.InstallationID,
 		GatewayGrantID: request.GrantID, Manufacturer: request.Manufacturer, Model: request.Model, Registrations: registrations,
 		Platform: request.Platform, ExpiresAt: request.ExpiresAt,
 		HandoffTokens: request.HandoffTokens,
@@ -303,7 +305,7 @@ func writePushError(c echo.Context, err error) error {
 		status = http.StatusBadRequest
 	case "route_not_found":
 		status = http.StatusNotFound
-	case "grant_conflict":
+	case "grant_conflict", "push_channel_ambiguous":
 		status = http.StatusConflict
 	case "grant_limit_reached":
 		status = http.StatusTooManyRequests

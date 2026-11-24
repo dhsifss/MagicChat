@@ -64,6 +64,40 @@ func registerPreparedClient(t *testing.T, client *HTTPPushServiceClient, cmd Reg
 	return client.RegisterEndpoint(t.Context(), cmd)
 }
 
+func TestPushServiceAmbiguousClientRegistrationRetainsRejectionAndCanBeRevoked(t *testing.T) {
+	creates := 0
+	client := newTestPushClient(t, func(w http.ResponseWriter, r *http.Request) {
+		if exchangeTestToken(t, w, r) {
+			return
+		}
+		switch {
+		case r.URL.Path == "/v1/devices":
+			_, _ = w.Write([]byte(`{"id":"` + testInstallationID + `"}`))
+		case r.Method == http.MethodGet:
+			_, _ = w.Write([]byte(`{"device_id":"` + testInstallationID + `","items":[],"has_more":false}`))
+		case r.URL.Path == "/v1/endpoints":
+			creates++
+			w.WriteHeader(http.StatusConflict)
+			_, _ = w.Write([]byte(`{"error":"client_channel_ambiguous"}`))
+		default:
+			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+		}
+	})
+	cmd := RegisterGrantCommand{ClientID: "cloud.example.clienta", GatewayGrantID: uuid.NewString(), Platform: "android", ExpiresAt: time.Now().Add(time.Hour), Registrations: []ProviderRegistration{{Provider: "xiaomi_push", Token: "native-token"}}}
+	reference, err := registerPreparedClient(t, client, cmd)
+	var upstream *GatewayError
+	if !errors.As(err, &upstream) || upstream.Code != "client_channel_ambiguous" {
+		t.Fatalf("ambiguous client was accepted: %v", err)
+	}
+	binding, ok := decodePushBinding(reference)
+	if !ok || len(binding.PendingCreates) != 1 || !binding.PendingCreates[0].Rejected {
+		t.Fatalf("rejection was not retained: %+v", binding)
+	}
+	if err := client.RevokeEndpoint(t.Context(), reference); err != nil || creates != 1 {
+		t.Fatalf("cleanup repeated a rejected registration: creates=%d error=%v", creates, err)
+	}
+}
+
 func TestPushServiceSettlesOmittedPendingCreation(t *testing.T) {
 	hmsID := strings.Repeat("f", 32)
 	var created []string

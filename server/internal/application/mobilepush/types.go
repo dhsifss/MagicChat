@@ -31,6 +31,7 @@ type ProviderRegistration struct {
 }
 
 type RegisterGrantCommand struct {
+	ClientID       string
 	Manufacturer   string
 	Model          string
 	Registrations  []ProviderRegistration

@@ -119,11 +119,12 @@ func TestPushAPIRoutesAuthenticatedUser(t *testing.T) {
 		"installation_id":"00000000-0000-0000-0000-000000000001",
 		"grant_id":"00000000-0000-0000-0000-000000000002",
 		"manufacturer":"Apple", "model":"iPhone",
+		"client_id":"cloud.baizhi.chat",
  "registrations":[{"provider":"apns","token":"abcdefghijklmnopqrstuvwxyz1234567890","environment":"production"}],
 		"platform":"ios",
 		"expires_at":"2026-09-21T09:00:00Z"
 	}`)
-	if register.Code != http.StatusOK || service.register.UserID != "user-1" || service.register.SessionID != "00000000-0000-0000-0000-000000000010" || !service.register.ExpiresAt.Equal(expiresAt) {
+	if register.Code != http.StatusOK || service.register.ClientID != "cloud.baizhi.chat" || service.register.UserID != "user-1" || service.register.SessionID != "00000000-0000-0000-0000-000000000010" || !service.register.ExpiresAt.Equal(expiresAt) {
 		t.Fatalf("register = %d/%s, command = %#v", register.Code, register.Body.String(), service.register)
 	}
 	revoke := servePushRequest(router, http.MethodPost, "/api/client/push/grants/00000000-0000-0000-0000-000000000001/revoke", `{
@@ -146,6 +147,11 @@ func TestPushAPIStrictJSONAndErrors(t *testing.T) {
 	invalid := servePushRequest(router, http.MethodPut, "/api/client/push/grants", `{"unknown":true}`)
 	if invalid.Code != http.StatusBadRequest {
 		t.Fatalf("invalid status = %d, body = %s", invalid.Code, invalid.Body.String())
+	}
+	service.err = &mobilepush.Error{Code: "push_channel_ambiguous", Message: "multiple matching channels"}
+	ambiguous := servePushRequest(router, http.MethodPut, "/api/client/push/grants", `{"client_id":"cloud.example.clienta"}`)
+	if ambiguous.Code != http.StatusConflict || !strings.Contains(ambiguous.Body.String(), "push_channel_ambiguous") {
+		t.Fatalf("ambiguous channel was not reported: %d %s", ambiguous.Code, ambiguous.Body.String())
 	}
 	service.err = &mobilepush.Error{Code: "push_disabled", Message: "disabled"}
 	disabled := servePushRequest(router, http.MethodPut, "/api/client/push/grants", `{

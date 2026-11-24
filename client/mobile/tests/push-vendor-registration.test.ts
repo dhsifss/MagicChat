@@ -23,6 +23,15 @@ test("APNs signing environment remains part of registration metadata", () => {
   assert.deepEqual(parseProviderRegistrations([{ provider: "apns", token: "apns-token", environment: "development" }], "ios"), [{ provider: "apns", token: "apns-token", environment: "development" }])
 })
 
+test("persisted client identity supports existing installations and validates application identifiers", () => {
+  const installation = { installationId: "installation", appVersion: "1", manufacturer: "Xiaomi", model: "test", platform: "android", registrations: [] }
+  assert.ok(parsePushInstallation(installation))
+  assert.equal(parsePushInstallation({ ...installation, clientId: "cloud.example.clienta" })?.clientId, "cloud.example.clienta")
+  for (const clientId of [null, "", " cloud.example.clienta", "cloud.example/clienta", "a".repeat(256)]) {
+    assert.equal(parsePushInstallation({ ...installation, clientId }), null)
+  }
+})
+
 test("native build validates complete SDK groups and merges only enabled callbacks", () => {
   assert.deepEqual(configuredChannels({}), [])
   assert.throws(() => configuredChannels({ PUSH_XIAOMI_APP_ID: "id" }), /Incomplete xiaomi/)
