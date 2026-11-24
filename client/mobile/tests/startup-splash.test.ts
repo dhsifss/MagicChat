@@ -20,10 +20,10 @@ test("冷启动验证凭据后先进入本地界面并后台同步", async () =>
   assert.match(authProvider, /publish\(next, snapshot, "authenticated"\)/)
   assert.match(authProvider, /queryClient\.invalidateQueries\(\{/)
   assert.match(authProvider, /void completion\.catch\(\(\) => undefined\)/)
-  assert.ok(
-    authProvider.indexOf('publish(next, snapshot, "authenticated")') <
-      authProvider.indexOf("void completion.catch(() => undefined)")
-  )
+  const initialization = authProvider.slice(authProvider.indexOf("useEffect(() => {"), authProvider.indexOf("const markReauthRequired"))
+  const publish = initialization.indexOf('publish(next, snapshot, "authenticated")')
+  const backgroundCompletion = initialization.indexOf("void completion.catch(() => undefined)")
+  assert.ok(publish >= 0 && backgroundCompletion > publish)
   assert.match(messagesScreen, /useLatestLocalMessages\(session, conversations\)/)
   assert.match(messagesScreen, /onConversationPressIn=\{handleConversationPressIn\}/)
   assert.match(messagesScreen, /prepareConversationMessages\(conversationId\)/)

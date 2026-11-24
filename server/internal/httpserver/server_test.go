@@ -15,6 +15,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -1250,22 +1251,18 @@ func TestAppWebSocketRechecksCredentialsAfterRegistration(t *testing.T) {
 	})
 
 	const callbackName = "test:disable_app_after_initial_websocket_auth"
-	queryCount := 0
+	var disabled atomic.Bool
 	disableResult := make(chan error, 1)
 	if err := db.Callback().Query().After("gorm:query").Register(callbackName, func(tx *gorm.DB) {
-		if tx.Statement.Table != "apps" || queryCount > 0 {
+		if tx.Statement.Table != "apps" || !disabled.CompareAndSwap(false, true) {
 			return
 		}
-		queryCount++
 		disableResult <- db.Model(&store.App{}).Where("id = ?", app.ID).Update("enabled", false).Error
 	}); err != nil {
 		t.Fatalf("register query callback: %v", err)
 	}
-	t.Cleanup(func() {
-		if err := db.Callback().Query().Remove(callbackName); err != nil {
-			t.Errorf("remove query callback: %v", err)
-		}
-	})
+	// This callback shares the isolated fixture database's lifetime, including
+	// the upgraded HTTP handler's final authorization query.
 
 	conn := dialAppWebSocket(t, server, app.ID, app.ConnectionSecret)
 	if err := <-disableResult; err != nil {

@@ -1,6 +1,8 @@
 import assert from "node:assert/strict"
 import { readFile } from "node:fs/promises"
 import test from "node:test"
+import { runInNewContext } from "node:vm"
+import ts from "typescript"
 import ExternalLinkIcon from "@hugeicons/core-free-icons/dist/esm/ExternalLinkIcon"
 import MessageMultiple02Icon from "@hugeicons/core-free-icons/dist/esm/MessageMultiple02Icon"
 import Volume02Icon from "@hugeicons/core-free-icons/dist/esm/Volume02Icon"
@@ -8,6 +10,9 @@ import PlayCircle02Icon from "@hugeicons/core-free-icons/dist/esm/PlayCircle02Ic
 import PauseCircleIcon from "@hugeicons/core-free-icons/dist/esm/PauseCircleIcon"
 
 import { formatVoicePlaybackTime } from "../src/features/conversation/voice/voice-message-presentation.ts"
+import { cardSummary } from "../../shared/card-summary.ts"
+import { parseTaskLink } from "../../shared/task-links.ts"
+import { parseContactLink } from "../../shared/contact-links.ts"
 
 const source = (path: string) => readFile(new URL(`../src/${path}`, import.meta.url), "utf8")
 
@@ -52,14 +57,38 @@ test("链接标题右侧提供独立复制按钮，复制完整URL并显示结�
 
 test("普通卡片样式对齐Desktop，保留宽度与长按/点击交互", async () => {
   const body = await source("features/conversation/messages/message-body.tsx")
-  const card = body.split("function MessageLinkCard(")[1].split("function ForwardBundleBody(")[0]
-  assert.match(card, /gap: 8, width: "100%"/)
-  assert.match(card, /color: colors\.textPrimary, fontSize: 15, fontWeight: "500", lineHeight: 23/)
-  assert.match(card, /numberOfLines=\{3\}.*color: colors\.textSecondary/)
-  assert.doesNotMatch(card, /ThemedIcon|accentColor|colors\.link|fontWeight: "600"|numberOfLines=\{[14]\}/)
-  assert.match(card, /onLongPress\(\)/)
-  assert.match(card, /if \(didLongPressRef\.current\)[\s\S]*?return[\s\S]*?onPress\?\.\(\)/)
-  assert.match(body, /onPress=\{body\.url\.trim\(\) \? \(\) => void openExternalUrl\(body\.url\) : undefined\}/)
+  const ast = ts.createSourceFile("body.tsx", body, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX)
+  const fn = ast.statements.find(node => ts.isFunctionDeclaration(node) && node.name?.text === "MessageLinkCard")!
+  const compiled = ts.transpileModule(fn.getText(ast) + "\nexports.render = MessageLinkCard", {
+    compilerOptions: { jsx: ts.JsxEmit.React, target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS },
+  }).outputText
+  const exports: any = {}
+  const colors = { textPrimary: "primary", textSecondary: "secondary" }
+  runInNewContext(compiled, {
+    exports, React: { createElement: (type: string, props: any, ...children: any[]) => ({ type, props, children }) },
+    Pressable: "Pressable", View: "View", Text: "Text", MessageContentIcon: "Icon",
+    useXGUITheme: () => ({ colors }), useRef: (current: boolean) => ({ current }),
+    cardSummary, parseTaskLink, parseContactLink,
+  })
+  let clicks = 0, longPresses = 0
+  const card = exports.render({ url: "https://example.test/card", title: "title", description: "summary", onPress: () => clicks++, onLongPress: () => longPresses++ })
+  assert.equal(card.props.style.gap, 8)
+  assert.equal(card.props.style.width, "100%")
+  assert.equal(card.props.style.flexDirection, "column")
+  const text = (node: any): any[] => !node || typeof node !== "object" ? [] : [...(node.type === "Text" ? [node] : []), ...(node.children ?? []).flatMap(text)]
+  const [title, summary] = text(card)
+  assert.deepEqual(JSON.parse(JSON.stringify(title.props.style)), { color: "primary", fontSize: 15, fontWeight: "500", lineHeight: 23 })
+  assert.equal(summary.props.numberOfLines, 3)
+  assert.equal(summary.props.style.color, "secondary")
+  card.props.onLongPress(); card.props.onPress()
+  assert.equal(longPresses, 1)
+  assert.equal(clicks, 0)
+  card.props.onPressIn(); card.props.onPress()
+  assert.equal(clicks, 1)
+  const handler = body.slice(body.indexOf("onPress={body.url.trim()"), body.indexOf("title={cardDisplayTitle"))
+  assert.match(handler, /onPress=\{body\.url\.trim\(\) \? \(\) => \{/)
+  assert.match(handler, /else void openExternalUrl\(body\.url\)/)
+  assert.match(handler, /\} : undefined\}/)
 })
 
 test("共享图标正确保留Desktop圆形播放按钮的圆环和实心三角", async () => {

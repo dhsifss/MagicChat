@@ -19,8 +19,18 @@ test("原生平台版本与 Expo 配置保持一致", async () => {
   assert.equal(appConfig.expo.ios.buildNumber, "35")
   assert.match(androidGradle, /versionCode 35/)
   assert.match(androidGradle, /versionName "2\.9\.2"/)
-  assert.equal(iosProject.match(/CURRENT_PROJECT_VERSION = 35;/g)?.length, 2)
-  assert.equal(iosProject.match(/MARKETING_VERSION = 2\.9\.2;/g)?.length, 2)
-  assert.match(iosInfo, /<key>CFBundleShortVersionString<\/key>\s*<string>2\.9\.2<\/string>/)
-  assert.match(iosInfo, /<key>CFBundleVersion<\/key>\s*<string>35<\/string>/)
+  for (const [plistKey, setting, expected] of [
+    ["CFBundleShortVersionString", "MARKETING_VERSION", appConfig.expo.version],
+    ["CFBundleVersion", "CURRENT_PROJECT_VERSION", appConfig.expo.ios.buildNumber],
+  ]) {
+    const value = iosInfo.match(new RegExp(`<key>${plistKey}</key>\\s*<string>([^<]+)</string>`))?.[1]
+    assert.ok(value, `missing ${plistKey}`)
+    if (value === `$(${setting})`) {
+      const settings = [...iosProject.matchAll(new RegExp(`${setting} = ([^;]+);`, "g"))]
+      assert.equal(settings.length, 2)
+      for (const match of settings) assert.equal(match[1].replaceAll('"', ""), expected)
+    } else {
+      assert.equal(value, expected)
+    }
+  }
 })
