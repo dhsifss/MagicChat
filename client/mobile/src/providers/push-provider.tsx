@@ -1,6 +1,6 @@
 import * as Notifications from "expo-notifications"
 import { addVendorPushRegistrationListener, addVendorNotificationResponseListener, getLastVendorNotificationResponse, clearLastVendorNotificationResponse } from "@/notifications/vendor-push-registration"
-import { useRouter, type Href } from "expo-router"
+import { useRouter, useRootNavigationState, type Href } from "expo-router"
 import { useEffect, useMemo, useRef, useState } from "react"
 import { AppState, Platform } from "react-native"
 import { createPushPresenceReporter, PUSH_PRESENCE_HEARTBEAT_MS } from "../../../shared/push-presence"
@@ -28,9 +28,10 @@ import { useRealtime } from "@/realtime/realtime-context"
 
 export function PushProvider({ children }: React.PropsWithChildren) {
   const router = useRouter()
+  const rootNavigation = useRootNavigationState()
   const { active, isAuthenticated, isHydrated, isSigningOut } = useAuth()
   const pushCoordinator = usePushCoordinator()
-  const { isMessageBootstrapComplete } = useClientDataStatus()
+  const { isMessageBootstrapComplete, isReady: isClientDataReady } = useClientDataStatus()
   const { ready: realtimeReady } = useRealtime()
   const [notificationCoordinator] = useState(
     () =>
@@ -203,6 +204,7 @@ export function PushProvider({ children }: React.PropsWithChildren) {
           response,
           identity: currentIdentity,
           isCurrent: isCurrentPushIdentity,
+          localNavigationReady: isClientDataReady && isMessageBootstrapComplete && Boolean(rootNavigation?.key),
         })
         .then((hasPendingRoute) => {
           if (hasPendingRoute) {
@@ -241,6 +243,9 @@ export function PushProvider({ children }: React.PropsWithChildren) {
     notificationCoordinator,
     router,
     identity,
+    isMessageBootstrapComplete,
+    isClientDataReady,
+    rootNavigation?.key,
   ])
 
   return (

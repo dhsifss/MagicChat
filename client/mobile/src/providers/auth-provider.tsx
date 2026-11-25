@@ -2,7 +2,7 @@ import AsyncStorage from "@react-native-async-storage/async-storage"
 import { useQueryClient } from "@tanstack/react-query"
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from "react"
 
-import type { AuthenticatedUser } from "@/core/models"
+import type { AuthenticatedUser, ClientUser } from "@/core/models"
 import type { AuthenticatedTarget, ServerTarget } from "@/core/server-target"
 import type { ActiveAccountRuntimeSnapshot } from "@/data/auth/account-auth-runtime"
 import { migrateLegacyAccount } from "@/data/auth/account-migration"
@@ -118,12 +118,22 @@ export function AuthProvider({ children }: React.PropsWithChildren) {
       }
 
       const target = targetOf(account)
-      queryClient.setQueryData(queryKeys.currentUser(target), {
-        avatar: account.avatar ?? "",
-        email: account.email ?? "",
-        id: account.userId,
-        name: account.name,
-      })
+      // Keep cached conversations readable while the full profile refreshes.
+      // Fields absent from the account index remain empty until fetched.
+      const currentUserKey = queryKeys.currentUser(target)
+      if (!queryClient.getQueryData<ClientUser>(currentUserKey)) {
+        queryClient.setQueryData<ClientUser>(currentUserKey, {
+          avatar: account.avatar ?? "",
+          createdAt: "",
+          email: account.email ?? "",
+          id: account.userId,
+          lastOnlineAt: null,
+          name: account.name,
+          nickname: "",
+          phone: "",
+          status: "active",
+        }, { updatedAt: 0 })
+      }
       const { completion, preparation } = beginBootstrap(account)
       const snapshot = { accountId: account.id, account, target, generation: preparation.generation }
       publish(next, snapshot, "authenticated")

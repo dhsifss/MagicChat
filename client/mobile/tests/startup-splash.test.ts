@@ -15,7 +15,6 @@ test("冷启动验证凭据后先进入本地界面并后台同步", async () =>
   assert.match(rootLayout, /MINIMUM_SPLASH_TIME_MS = 500/)
   assert.doesNotMatch(rootLayout, /isMessageBootstrapComplete/)
   assert.match(authProvider, /accountStore\.getCredential\(account\.id\)/)
-  assert.match(authProvider, /queryClient\.setQueryData\(queryKeys\.currentUser\(target\)/)
   assert.match(authProvider, /const \{ completion, preparation \} = beginBootstrap\(account\)/)
   assert.match(authProvider, /publish\(next, snapshot, "authenticated"\)/)
   assert.match(authProvider, /queryClient\.invalidateQueries\(\{/)

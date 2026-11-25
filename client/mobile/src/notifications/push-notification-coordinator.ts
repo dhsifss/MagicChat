@@ -44,17 +44,19 @@ export class PushNotificationCoordinator {
     response,
     identity,
     isCurrent,
+    localNavigationReady = true,
   }: {
     navigateLocal: (conversationId: string) => void | Promise<void>
     response: PushNotificationResponseData
     identity: PushAccountIdentity | null
     isCurrent: (identity: PushAccountIdentity) => boolean
+    localNavigationReady?: boolean
   }) {
     return this.queue.run(async () => {
       const remoteData = parsePushNotificationData(response.data)
       if (!remoteData) {
         const localRoute = parseLocalNotificationRoute(response.data)
-        if (!localRoute || !identity || !isCurrent(identity) ||
+        if (!localNavigationReady || !localRoute || !identity || !isCurrent(identity) ||
           localRoute.accountId !== identity.accountId ||
           localRoute.generation !== identity.generation ||
           !targetsMatch(localRoute.target, identity.target)) return false

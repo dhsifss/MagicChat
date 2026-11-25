@@ -167,6 +167,31 @@ test("local response can retry after synchronous navigation failure", async () =
   assert.equal(harness.clearCount, 1)
 })
 
+test("cold local response waits for navigation readiness and is consumed once", async () => {
+  const harness = createHarness()
+  const response = {
+    data: { accountId: IDENTITY.accountId, conversationId: "conversation-1", generation: 1, serverId: TARGET.id, serverUrl: TARGET.url, userId: TARGET.userId },
+    date: Date.now(),
+    identifier: "cold-local",
+  }
+  let navigations = 0
+  const operations = { response, identity: IDENTITY, isCurrent: () => true, navigateLocal: () => { navigations++ } }
+  await harness.coordinator.handleResponse({ ...operations, localNavigationReady: false })
+  assert.equal(navigations, 0)
+  assert.equal(harness.clearCount, 0)
+  await harness.coordinator.handleResponse({ ...operations, localNavigationReady: true })
+  await harness.coordinator.handleResponse({ ...operations, localNavigationReady: true })
+  assert.equal(navigations, 1)
+  assert.equal(harness.clearCount, 1)
+})
+
+test("remote responses can queue while local navigation is preparing", async () => {
+  const harness = createHarness()
+  await harness.coordinator.handleResponse({ response: remoteResponse("cold-remote"), identity: IDENTITY, isCurrent: () => true, navigateLocal: () => assert.fail("local navigation"), localNavigationReady: false })
+  assert.equal(harness.routes.length, 1)
+  assert.equal(harness.clearCount, 1)
+})
+
 test("account switch while loadDelegation is pending cannot enqueue old payload", async () => {
   let release!: (delegation: PushDelegation) => void
   const loading = new Promise<PushDelegation>((resolve) => { release = resolve })
