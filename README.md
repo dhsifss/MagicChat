@@ -52,6 +52,7 @@
 
 ## 开发文档
 
+- [文档目录](docs/README.md)
 - [第三方应用接入开发指南](APPLICATION_DEVELOPMENT.md)
 - [协作文档服务说明](document-server/README.md)
 - [消息分区设计](server/docs/message-partitions.md)
